@@ -1,0 +1,31 @@
+name: HES CMMS Zamanlayıcı
+
+# Bu iş akışı, hes_cmms_scheduler.js'i GitHub'ın kendi bulut sunucularında
+# günlük olarak çalıştırır — bilgisayarınızın açık olmasına gerek kalmaz.
+# Tamamen ücretsizdir (public depolarda GitHub Actions dakika sınırı yoktur).
+
+on:
+  schedule:
+    # Her gün UTC 03:00 = Türkiye saati (UTC+3) 06:00
+    - cron: "0 3 * * *"
+  workflow_dispatch: {} # "Actions" sekmesinden elle de tetiklenebilsin diye
+
+jobs:
+  calistir:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Kodu al
+        uses: actions/checkout@v4
+
+      - name: Node.js kur
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Bağımlılıkları kur
+        run: npm ci
+
+      - name: Zamanlayıcıyı çalıştır
+        run: node hes_cmms_scheduler.js
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
