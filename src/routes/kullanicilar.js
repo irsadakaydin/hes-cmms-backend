@@ -30,8 +30,18 @@ router.get(
       }
 
       const { rows } = await req.db.query(
-        `SELECT kullanici_id, ad_soyad, eposta, telefon, rol, aktif_mi, son_giris_tarihi
-         FROM kullanici WHERE isletme_id = $1 ORDER BY ad_soyad`,
+        `SELECT
+           k.kullanici_id, k.ad_soyad, k.eposta, k.telefon, k.rol, k.aktif_mi, k.son_giris_tarihi,
+           COALESCE(
+             (SELECT json_agg(json_build_object('santral_id', s.santral_id, 'ad', s.ad) ORDER BY s.ad)
+              FROM kullanici_santral ks
+              JOIN santral s ON s.santral_id = ks.santral_id
+              WHERE ks.kullanici_id = k.kullanici_id),
+             '[]'
+           ) AS santral_erisimleri
+         FROM kullanici k
+         WHERE k.isletme_id = $1
+         ORDER BY k.ad_soyad`,
         [isletme_id]
       );
       res.json({ veri: rows });
@@ -86,7 +96,7 @@ router.post(
         return res.status(403).json({ hata_kodu: "YETKI_YOK", mesaj: "Bu işletmeye erişim yetkiniz yok." });
       }
 
-      const { ad_soyad, eposta, telefon, rol } = req.body;
+      const { ad_soyad, eposta, telefon, rol, sifre } = req.body;
       const izinliRoller = ["ISLETME_ADMIN", "SANTRAL_SORUMLUSU", "SAHA_PERSONELI", "IZLEYICI"];
       if (!ad_soyad || !eposta || !rol || !izinliRoller.includes(rol)) {
         return res.status(400).json({
@@ -95,9 +105,20 @@ router.post(
         });
       }
 
-      // Geçici şifre — gerçek akışta burada bir "davet e-postası + şifre belirleme linki" gönderilir
-      const geciciSifre = Math.random().toString(36).slice(2) + Date.now().toString(36);
-      const sifreHash = await bcrypt.hash(geciciSifre, 10);
+      // GM/İşletme Admin bir başlangıç şifresi belirtmişse onu kullan; belirtmemişse
+      // rastgele bir şifre üretip yanıt gövdesinde BİR KEZ döndürüyoruz (daha sonra
+      // tekrar görüntülenemez — şifreler geri döndürülemez şekilde saklanır).
+      let atananSifre = sifre;
+      if (atananSifre && atananSifre.length < 6) {
+        return res.status(400).json({
+          hata_kodu: "GECERSIZ_SIFRE",
+          mesaj: "Şifre en az 6 karakter olmalıdır.",
+        });
+      }
+      if (!atananSifre) {
+        atananSifre = Math.random().toString(36).slice(2) + Date.now().toString(36);
+      }
+      const sifreHash = await bcrypt.hash(atananSifre, 10);
 
       const { rows } = await req.db.query(
         `INSERT INTO kullanici (isletme_id, ad_soyad, eposta, sifre_hash, telefon, rol)
@@ -108,7 +129,9 @@ router.post(
 
       res.status(201).json({
         kullanici: rows[0],
-        not: "Gerçek kullanımda burada bir davet e-postası (şifre belirleme linkiyle) gönderilmelidir.",
+        // Yalnızca şifre GM tarafından belirtilmediyse (rastgele üretildiyse) döndürülür —
+        // bu, kullanıcıya bir kez iletilip ardından kaydedilmeyecek geçici bir değerdir.
+        uretilen_sifre: sifre ? undefined : atananSifre,
       });
     } catch (err) {
       if (err.code === "23505") {
@@ -264,6 +287,42 @@ router.post(
         req.params.kullanici_id,
       ]);
       res.json({ mesaj: "Kullanıcı hesabının engeli kaldırıldı." });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// POST /api/v1/kullanicilar/:kullanici_id/sifre-sifirla — GM/İşletme Admin
+// bir kullanıcıya doğrudan yeni bir şifre belirler (var olan şifre görüntülenemez,
+// yalnızca yenisi atanabilir).
+router.post(
+  "/kullanicilar/:kullanici_id/sifre-sifirla",
+  requireRole(...ISLETME_YONETICI_ROLLERI),
+  async (req, res, next) => {
+    try {
+      const { bulundu, ayni } = await ayniIsletmedeMi(req, req.params.kullanici_id);
+      if (!bulundu) {
+        return res.status(404).json({ hata_kodu: "KULLANICI_BULUNAMADI", mesaj: "Kullanıcı bulunamadı." });
+      }
+      if (!ayni) {
+        return res.status(403).json({ hata_kodu: "YETKI_YOK", mesaj: "Bu kullanıcıya erişim yetkiniz yok." });
+      }
+
+      const { yeni_sifre } = req.body;
+      if (!yeni_sifre || yeni_sifre.length < 6) {
+        return res.status(400).json({
+          hata_kodu: "GECERSIZ_SIFRE",
+          mesaj: "yeni_sifre alanı zorunludur ve en az 6 karakter olmalıdır.",
+        });
+      }
+
+      const sifreHash = await bcrypt.hash(yeni_sifre, 10);
+      await req.db.query(`UPDATE kullanici SET sifre_hash = $1 WHERE kullanici_id = $2`, [
+        sifreHash,
+        req.params.kullanici_id,
+      ]);
+      res.json({ mesaj: "Şifre güncellendi." });
     } catch (err) {
       next(err);
     }
