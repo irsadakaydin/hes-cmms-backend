@@ -1,5 +1,6 @@
 require("dotenv").config();
 const express = require("express");
+const cors = require("cors");
 
 const authRoutes = require("./routes/auth");
 const santralRoutes = require("./routes/santraller");
@@ -13,6 +14,11 @@ const bildirimRoutes = require("./routes/bildirimler");
 const raporRoutes = require("./routes/raporlar");
 
 const app = express();
+// NOT: Şu an tüm kaynaklardan (origin) isteğe izin veriliyor — MVP/geliştirme
+// aşaması için pratik bir seçim. Frontend'iniz sabit bir alan adına
+// yerleştiğinde, bunu o alan adıyla sınırlamak isteyebilirsiniz:
+// app.use(cors({ origin: "https://sizin-frontend-adresiniz.vercel.app" }));
+app.use(cors());
 app.use(express.json());
 
 // Basit sağlık kontrolü — deploy sonrası hızlı doğrulama için
