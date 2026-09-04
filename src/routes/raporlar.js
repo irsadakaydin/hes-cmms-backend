@@ -8,8 +8,9 @@ const { withDbContext } = require("../middleware/dbContext");
 // Türkçe karakterleri (ı, ş, ğ, ü, ö, ç, İ) doğru göstermek için pdfkit'in
 // varsayılan 14 fontu yetersiz (yalnızca WinAnsi kodlaması) — bu yüzden
 // Unicode desteği tam olan DejaVu Sans fontunu projeye gömüp kullanıyoruz.
-const FONT_NORMAL = path.join(__dirname, "..", "assets", "DejaVuSans.ttf");
-const FONT_KALIN = path.join(__dirname, "..", "assets", "DejaVuSans-Bold.ttf");
+// NOT: Font dosyaları src/ klasörünün KÖKÜNDE duruyor (src/assets/ altında değil).
+const FONT_NORMAL = path.join(__dirname, "..", "DejaVuSans.ttf");
+const FONT_KALIN = path.join(__dirname, "..", "DejaVuSans-Bold.ttf");
 
 const router = express.Router();
 router.use(requireAuth, withDbContext);
