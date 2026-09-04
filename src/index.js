@@ -52,6 +52,18 @@ app.use((err, req, res, next) => {
   });
 });
 
+// Güvenlik ağı: beklenmedik/yakalanmamış bir hata tüm sunucuyu çökertip
+// sistemin geri kalanını (görev tamamlama, giriş, vb.) etkilemesin diye —
+// hatayı logla, süreci KAPATMA. Render'ın kendi otomatik yeniden başlatma
+// mekanizmasına (gerçek bir çökme durumunda) güvenmeye devam ediyoruz,
+// ama tek bir isteğin hatası artık herkesi etkilemeyecek.
+process.on("uncaughtException", (err) => {
+  console.error("Yakalanmamış hata (süreç devam ediyor):", err);
+});
+process.on("unhandledRejection", (err) => {
+  console.error("Yakalanmamış promise reddi (süreç devam ediyor):", err);
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`HES CMMS API — http://localhost:${PORT} üzerinde çalışıyor`);
