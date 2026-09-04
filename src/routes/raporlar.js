@@ -204,6 +204,19 @@ router.get("/santral/:santral_id/pdf", async (req, res, next) => {
     );
 
     const dokuman = new PDFDocument({ size: "A4", margin: 50 });
+
+    // İstemci PDF akışı tamamlanmadan bağlantıyı keserse (ör. tarayıcı
+    // isteği iptal eder, sekme kapanır), pdfkit yine de akışa yazmaya
+    // devam edebilir ve bu "write after end" hatası yakalanmazsa TÜM
+    // Node.js sürecini çökertir. Bu iki dinleyici, hatayı sessizce
+    // loglayıp sürecin ayakta kalmasını sağlar.
+    res.on("error", (err) => {
+      console.error("Rapor akışı hatası (istemci muhtemelen bağlantıyı kesti):", err.message);
+    });
+    dokuman.on("error", (err) => {
+      console.error("PDF üretim hatası:", err.message);
+    });
+
     dokuman.pipe(res);
     dokuman.registerFont("DejaVu", FONT_NORMAL);
     dokuman.registerFont("DejaVu-Bold", FONT_KALIN);
