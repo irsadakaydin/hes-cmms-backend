@@ -305,19 +305,30 @@ async function genelRaporVerisiTopla(req) {
     params.push(req.query.periyot);
     ekKosul += ` AND bp.periyot = $${params.length}`;
   }
+
+  // Tarih aralığı filtresi — GECİKMİŞ (durum='GECIKTI') görevler bu
+  // filtreden HER ZAMAN muaf tutulur: bir bakım hâlâ tamamlanmamış ve
+  // gecikmişse, planlanan tarihi seçilen dönemin dışında kalsa bile
+  // raporda görünmeye devam etmesi gerekir (aksi halde "Bu Ay" gibi bir
+  // filtre, geçen aydan kalan gecikmiş bir bakımı gizlemiş olurdu).
+  const tarihSartlari = [];
   if (req.query.baslangic) {
     params.push(req.query.baslangic);
-    ekKosul += ` AND g.planlanan_tarih >= $${params.length}`;
+    tarihSartlari.push(`g.planlanan_tarih >= $${params.length}`);
   }
   if (req.query.bitis) {
     params.push(req.query.bitis);
-    ekKosul += ` AND g.planlanan_tarih <= $${params.length}`;
+    tarihSartlari.push(`g.planlanan_tarih <= $${params.length}`);
+  }
+  if (tarihSartlari.length > 0) {
+    ekKosul += ` AND (g.durum = 'GECIKTI' OR (${tarihSartlari.join(" AND ")}))`;
   }
 
   const { rows: gorevler } = await req.db.query(
     `SELECT
        g.gorev_id, g.durum, g.planlanan_tarih,
        s.ad AS santral_adi,
+       bp.periyot,
        e.ad AS ekipman_adi, bs.ad AS bakim_adi,
        atanan.ad_soyad AS atanan_personel,
        bk.tamamlanma_tarihi,
@@ -350,12 +361,13 @@ async function genelRaporVerisiTopla(req) {
 
 function pdfBakimTablosuCiz(dokuman, gorevler) {
   const sutunlar = [
-    { baslik: "Santral", genislik: 95 },
-    { baslik: "Bakım Adı", genislik: 260 },
-    { baslik: "Durum", genislik: 78 },
-    { baslik: "Personel", genislik: 90 },
-    { baslik: "Atama Tarihi", genislik: 75 },
-    { baslik: "Tamamlama T.", genislik: 85 },
+    { baslik: "Santral", genislik: 90 },
+    { baslik: "Bakım Adı", genislik: 210 },
+    { baslik: "Periyot", genislik: 65 },
+    { baslik: "Durum", genislik: 72 },
+    { baslik: "Personel", genislik: 85 },
+    { baslik: "Atama Tarihi", genislik: 72 },
+    { baslik: "Tamamlama T.", genislik: 82 },
   ];
   const tabloSolX = 40;
   let y = dokuman.y;
@@ -390,10 +402,11 @@ function pdfBakimTablosuCiz(dokuman, gorevler) {
     }
     hucreYaz(g.santral_adi, 0, false);
     hucreYaz(`${g.ekipman_adi} — ${g.bakim_adi}`, 1, false);
-    hucreYaz(DURUM_ETIKETLERI[g.durum] || g.durum, 2, true, DURUM_RENK[g.durum] || "#13201c");
-    hucreYaz(g.tamamlayan_personel || g.atanan_personel, 3, false);
-    hucreYaz(tarihFormatla(g.planlanan_tarih), 4, false);
-    hucreYaz(tarihFormatla(g.tamamlanma_tarihi), 5, false);
+    hucreYaz(PERIYOT_ETIKETLERI[g.periyot] || g.periyot, 2, false);
+    hucreYaz(DURUM_ETIKETLERI[g.durum] || g.durum, 3, true, DURUM_RENK[g.durum] || "#13201c");
+    hucreYaz(g.tamamlayan_personel || g.atanan_personel, 4, false);
+    hucreYaz(tarihFormatla(g.planlanan_tarih), 5, false);
+    hucreYaz(tarihFormatla(g.tamamlanma_tarihi), 6, false);
     y += SATIR_YUKSEKLIGI;
   });
 
@@ -507,7 +520,8 @@ router.get("/excel", requireRole(...RAPOR_ROLLERI), async (req, res, next) => {
     const gorevSheet = workbook.addWorksheet("Bakım Kayıtları");
     gorevSheet.columns = [
       { header: "Santral", key: "santral_adi", width: 18 },
-      { header: "Bakım Adı", key: "bakim_adi", width: 42 },
+      { header: "Bakım Adı", key: "bakim_adi", width: 38 },
+      { header: "Periyot", key: "periyot", width: 14 },
       { header: "Durum", key: "durum", width: 14 },
       { header: "Personel", key: "personel", width: 20 },
       { header: "Atama Tarihi", key: "atama_tarihi", width: 14 },
@@ -518,6 +532,7 @@ router.get("/excel", requireRole(...RAPOR_ROLLERI), async (req, res, next) => {
       const satir = gorevSheet.addRow({
         santral_adi: g.santral_adi,
         bakim_adi: `${g.ekipman_adi} — ${g.bakim_adi}`,
+        periyot: PERIYOT_ETIKETLERI[g.periyot] || g.periyot,
         durum: DURUM_ETIKETLERI[g.durum] || g.durum,
         personel: g.tamamlayan_personel || g.atanan_personel,
         atama_tarihi: tarihFormatla(g.planlanan_tarih),
