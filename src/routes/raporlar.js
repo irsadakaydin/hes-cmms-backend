@@ -229,6 +229,320 @@ function tarihFormatla(deger) {
 
 const RAPOR_ROLLERI = ["SANTRAL_SORUMLUSU", "ISLETME_ADMIN", "ADMIN"];
 
+/** Oturum açan kullanıcının erişebildiği tüm santral kimliklerini döner. */
+async function erisilenSantralIdleri(req) {
+  const { rows } = await req.db.query(
+    `SELECT santral_id FROM v_kullanici_yetkili_santraller WHERE kullanici_id = $1`,
+    [req.user.kullanici_id]
+  );
+  return rows.map((r) => r.santral_id);
+}
+
+// GET /api/v1/raporlar/filtre-secenekleri — "Rapor Oluştur" sayfasındaki
+// Santral ve Bakım Sorumlusu kutularını doldurmak için kullanılır.
+router.get("/filtre-secenekleri", requireRole(...RAPOR_ROLLERI), async (req, res, next) => {
+  try {
+    const santralIdleri = await erisilenSantralIdleri(req);
+    if (santralIdleri.length === 0) {
+      return res.json({ santraller: [], personel: [] });
+    }
+
+    const { rows: santraller } = await req.db.query(
+      `SELECT s.santral_id, s.ad, i.ad AS isletme_adi
+       FROM santral s JOIN isletme i ON i.isletme_id = s.isletme_id
+       WHERE s.santral_id = ANY($1::uuid[])
+       ORDER BY i.ad, s.ad`,
+      [santralIdleri]
+    );
+
+    const { rows: personel } = await req.db.query(
+      `SELECT DISTINCT k.kullanici_id, k.ad_soyad
+       FROM kullanici k
+       WHERE k.kullanici_id IN (
+         SELECT kullanici_id FROM v_kullanici_yetkili_santraller WHERE santral_id = ANY($1::uuid[])
+       )
+       AND k.rol IN ('SAHA_PERSONELI', 'SANTRAL_SORUMLUSU')
+       AND k.aktif_mi = TRUE
+       ORDER BY k.ad_soyad`,
+      [santralIdleri]
+    );
+
+    res.json({ santraller, personel });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ---------------------------------------------------------------------
+// Genel (tek ya da çoklu santral) rapor verisi toplama — "Rapor Oluştur"
+// sayfasındaki 4 kutu (santral, periyot, sorumlu, tarih aralığı) burada
+// birleştirilir. Herhangi bir kutu boş bırakılırsa o filtre uygulanmaz
+// (hepsi seçilmiş gibi davranılır).
+// ---------------------------------------------------------------------
+async function genelRaporVerisiTopla(req) {
+  const santralIdleri = await erisilenSantralIdleri(req);
+  if (santralIdleri.length === 0) {
+    return { gorevler: [], ozet: { toplam_gorev: 0, tamamlanan: 0, gecikmis: 0, bekleyen: 0, tamamlanma_yuzdesi: 0 }, baslik: "Bakım Raporu" };
+  }
+
+  const params = [santralIdleri];
+  let ekKosul = "";
+
+  if (req.query.santral_id) {
+    if (!santralIdleri.includes(req.query.santral_id)) {
+      const hata = new Error("Bu santrale erişim yetkiniz yok.");
+      hata.durum = 403;
+      throw hata;
+    }
+    params.push(req.query.santral_id);
+    ekKosul += ` AND s.santral_id = $${params.length}`;
+  }
+  if (req.query.sorumlu_kullanici_id) {
+    params.push(req.query.sorumlu_kullanici_id);
+    ekKosul += ` AND g.atanan_kullanici_id = $${params.length}`;
+  }
+  if (req.query.periyot) {
+    params.push(req.query.periyot);
+    ekKosul += ` AND bp.periyot = $${params.length}`;
+  }
+  if (req.query.baslangic) {
+    params.push(req.query.baslangic);
+    ekKosul += ` AND g.planlanan_tarih >= $${params.length}`;
+  }
+  if (req.query.bitis) {
+    params.push(req.query.bitis);
+    ekKosul += ` AND g.planlanan_tarih <= $${params.length}`;
+  }
+
+  const { rows: gorevler } = await req.db.query(
+    `SELECT
+       g.gorev_id, g.durum, g.planlanan_tarih,
+       s.ad AS santral_adi,
+       e.ad AS ekipman_adi, bs.ad AS bakim_adi,
+       atanan.ad_soyad AS atanan_personel,
+       bk.tamamlanma_tarihi,
+       tamamlayan.ad_soyad AS tamamlayan_personel
+     FROM bakim_gorevi g
+     JOIN bakim_plani bp     ON bp.plan_id = g.plan_id
+     JOIN santral s          ON s.santral_id = bp.santral_id
+     JOIN ekipman e          ON e.ekipman_id = bp.ekipman_id
+     JOIN bakim_sablonu bs   ON bs.sablon_id = bp.sablon_id
+     JOIN kullanici atanan   ON atanan.kullanici_id = g.atanan_kullanici_id
+     LEFT JOIN bakim_kaydi bk       ON bk.gorev_id = g.gorev_id
+     LEFT JOIN kullanici tamamlayan ON tamamlayan.kullanici_id = bk.tamamlayan_kullanici_id
+     WHERE s.santral_id = ANY($1::uuid[]) ${ekKosul}
+     ORDER BY g.planlanan_tarih DESC`,
+    params
+  );
+
+  const ozet = {
+    toplam_gorev: gorevler.length,
+    tamamlanan: gorevler.filter((g) => g.durum === "TAMAMLANDI").length,
+    gecikmis: gorevler.filter((g) => g.durum === "GECIKTI").length,
+    bekleyen: gorevler.filter((g) => g.durum === "BEKLIYOR").length,
+  };
+  ozet.tamamlanma_yuzdesi = ozet.toplam_gorev
+    ? Math.round((ozet.tamamlanan / ozet.toplam_gorev) * 1000) / 10
+    : 0;
+
+  return { gorevler, ozet };
+}
+
+function pdfBakimTablosuCiz(dokuman, gorevler) {
+  const sutunlar = [
+    { baslik: "Santral", genislik: 95 },
+    { baslik: "Bakım Adı", genislik: 260 },
+    { baslik: "Durum", genislik: 78 },
+    { baslik: "Personel", genislik: 90 },
+    { baslik: "Atama Tarihi", genislik: 75 },
+    { baslik: "Tamamlama T.", genislik: 85 },
+  ];
+  const tabloSolX = 40;
+  let y = dokuman.y;
+  const SATIR_YUKSEKLIGI = 16;
+
+  function hucreYaz(metin, sutunIndex, kalinMi, renk) {
+    let x = tabloSolX;
+    for (let i = 0; i < sutunIndex; i++) x += sutunlar[i].genislik;
+    dokuman
+      .font(kalinMi ? "DejaVu-Bold" : "DejaVu")
+      .fontSize(8.5)
+      .fillColor(renk || "#13201c")
+      .text(String(metin), x, y, {
+        width: sutunlar[sutunIndex].genislik - 8,
+        height: SATIR_YUKSEKLIGI,
+        ellipsis: true,
+        lineBreak: false,
+      });
+  }
+
+  sutunlar.forEach((s, i) => hucreYaz(s.baslik, i, true, "#0f3d3e"));
+  y += SATIR_YUKSEKLIGI;
+  dokuman.strokeColor("#c9d0c8").lineWidth(0.5).moveTo(tabloSolX, y - 2).lineTo(802, y - 2).stroke();
+  y += 2;
+
+  const DURUM_RENK = { TAMAMLANDI: "#2c7a4b", GECIKTI: "#a83b2e", BEKLIYOR: "#c17a24", DEVAM_EDIYOR: "#1d4e75" };
+
+  gorevler.forEach((g) => {
+    if (y > 555) {
+      dokuman.addPage({ size: "A4", layout: "landscape", margin: 40 });
+      y = 40;
+    }
+    hucreYaz(g.santral_adi, 0, false);
+    hucreYaz(`${g.ekipman_adi} — ${g.bakim_adi}`, 1, false);
+    hucreYaz(DURUM_ETIKETLERI[g.durum] || g.durum, 2, true, DURUM_RENK[g.durum] || "#13201c");
+    hucreYaz(g.tamamlayan_personel || g.atanan_personel, 3, false);
+    hucreYaz(tarihFormatla(g.planlanan_tarih), 4, false);
+    hucreYaz(tarihFormatla(g.tamamlanma_tarihi), 5, false);
+    y += SATIR_YUKSEKLIGI;
+  });
+
+  if (gorevler.length === 0) {
+    dokuman.font("DejaVu").fontSize(9).fillColor("#5b6b62").text("Seçilen filtrelerle eşleşen görev bulunmuyor.", tabloSolX, y);
+    y += SATIR_YUKSEKLIGI;
+  }
+  return y;
+}
+
+// GET /api/v1/raporlar/pdf — santral_id/periyot/sorumlu_kullanici_id/baslangic/bitis
+// hepsi isteğe bağlıdır; boş bırakılan filtre uygulanmaz (hepsi seçilmiş sayılır).
+router.get("/pdf", requireRole(...RAPOR_ROLLERI), async (req, res, next) => {
+  try {
+    const { gorevler, ozet } = await genelRaporVerisiTopla(req);
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="bakim-raporu.pdf"`);
+
+    const dokuman = new PDFDocument({ size: "A4", margin: 40, layout: "landscape" });
+    res.on("error", (err) => console.error("Rapor akışı hatası:", err.message));
+    dokuman.on("error", (err) => console.error("PDF üretim hatası:", err.message));
+    dokuman.pipe(res);
+    dokuman.registerFont("DejaVu", FONT_NORMAL);
+    dokuman.registerFont("DejaVu-Bold", FONT_KALIN);
+
+    dokuman.font("DejaVu-Bold").fontSize(16).fillColor("#0f3d3e").text("HES Bakım Yönetim Sistemi");
+    dokuman.font("DejaVu-Bold").fontSize(12).fillColor("#13201c").text("Bakım Raporu");
+
+    const donemMetni =
+      req.query.baslangic || req.query.bitis
+        ? `Dönem: ${req.query.baslangic ? tarihFormatla(req.query.baslangic) : "…"} – ${
+            req.query.bitis ? tarihFormatla(req.query.bitis) : "…"
+          }`
+        : "Dönem: Tüm zamanlar";
+    const periyotMetni = req.query.periyot
+      ? `   |   Periyot: ${PERIYOT_ETIKETLERI[req.query.periyot] || req.query.periyot}`
+      : "   |   Periyot: Tümü";
+    dokuman
+      .font("DejaVu")
+      .fontSize(8)
+      .fillColor("#5b6b62")
+      .text(`${donemMetni}${periyotMetni}   |   Rapor tarihi: ${tarihFormatla(new Date())}`);
+    dokuman.moveDown(0.8);
+    dokuman.strokeColor("#c17a24").lineWidth(1.5).moveTo(40, dokuman.y).lineTo(802, dokuman.y).stroke();
+    dokuman.moveDown(0.6);
+
+    dokuman
+      .font("DejaVu")
+      .fontSize(9)
+      .fillColor("#13201c")
+      .text(
+        `Toplam: ${ozet.toplam_gorev}   ·   Tamamlanan: ${ozet.tamamlanan}   ·   Gecikmiş: ${ozet.gecikmis}   ·   Bekleyen: ${ozet.bekleyen}   ·   Tamamlanma: %${ozet.tamamlanma_yuzdesi}`
+      );
+    dokuman.moveDown(0.8);
+
+    let y = pdfBakimTablosuCiz(dokuman, gorevler);
+
+    y += 30;
+    if (y > 540) {
+      dokuman.addPage({ size: "A4", layout: "landscape", margin: 40 });
+      y = 40;
+    }
+    dokuman.font("DejaVu").fontSize(9).fillColor("#5b6b62");
+    dokuman.text("Bakım Müdürlüğü", 40, y);
+    dokuman.text("_____________________", 40, y + 30);
+    dokuman.text("İşletme Yöneticisi / Müdürü", 340, y);
+    dokuman.text("_____________________", 340, y + 30);
+
+    dokuman.end();
+  } catch (err) {
+    if (err.durum === 403) {
+      return res.status(403).json({ hata_kodu: "YETKI_YOK", mesaj: err.message });
+    }
+    next(err);
+  }
+});
+
+// GET /api/v1/raporlar/excel — aynı filtreler
+router.get("/excel", requireRole(...RAPOR_ROLLERI), async (req, res, next) => {
+  try {
+    const { gorevler, ozet } = await genelRaporVerisiTopla(req);
+
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = "HES CMMS";
+    workbook.created = new Date();
+
+    const ozetSheet = workbook.addWorksheet("Özet");
+    ozetSheet.columns = [
+      { header: "Alan", key: "alan", width: 28 },
+      { header: "Değer", key: "deger", width: 24 },
+    ];
+    ozetSheet.getRow(1).font = { bold: true };
+    ozetSheet.addRows([
+      {
+        alan: "Dönem",
+        deger:
+          req.query.baslangic || req.query.bitis
+            ? `${tarihFormatla(req.query.baslangic)} – ${tarihFormatla(req.query.bitis)}`
+            : "Tüm zamanlar",
+      },
+      { alan: "Bakım periyodu", deger: req.query.periyot ? (PERIYOT_ETIKETLERI[req.query.periyot] || req.query.periyot) : "Tümü" },
+      { alan: "Rapor tarihi", deger: tarihFormatla(new Date()) },
+      { alan: "Toplam görev", deger: ozet.toplam_gorev },
+      { alan: "Tamamlanan", deger: ozet.tamamlanan },
+      { alan: "Gecikmiş", deger: ozet.gecikmis },
+      { alan: "Bekleyen", deger: ozet.bekleyen },
+      { alan: "Tamamlanma yüzdesi (%)", deger: ozet.tamamlanma_yuzdesi },
+    ]);
+
+    const gorevSheet = workbook.addWorksheet("Bakım Kayıtları");
+    gorevSheet.columns = [
+      { header: "Santral", key: "santral_adi", width: 18 },
+      { header: "Bakım Adı", key: "bakim_adi", width: 42 },
+      { header: "Durum", key: "durum", width: 14 },
+      { header: "Personel", key: "personel", width: 20 },
+      { header: "Atama Tarihi", key: "atama_tarihi", width: 14 },
+      { header: "Tamamlama Tarihi", key: "tamamlama_tarihi", width: 16 },
+    ];
+    gorevSheet.getRow(1).font = { bold: true };
+    gorevler.forEach((g) => {
+      const satir = gorevSheet.addRow({
+        santral_adi: g.santral_adi,
+        bakim_adi: `${g.ekipman_adi} — ${g.bakim_adi}`,
+        durum: DURUM_ETIKETLERI[g.durum] || g.durum,
+        personel: g.tamamlayan_personel || g.atanan_personel,
+        atama_tarihi: tarihFormatla(g.planlanan_tarih),
+        tamamlama_tarihi: tarihFormatla(g.tamamlanma_tarihi),
+      });
+      const renkler = { TAMAMLANDI: "FF2C7A4B", GECIKTI: "FFA83B2E", BEKLIYOR: "FFC17A24", DEVAM_EDIYOR: "FF1D4E75" };
+      if (renkler[g.durum]) {
+        satir.getCell("durum").font = { color: { argb: renkler[g.durum] }, bold: true };
+      }
+    });
+
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    res.setHeader("Content-Disposition", `attachment; filename="bakim-raporu.xlsx"`);
+
+    await workbook.xlsx.write(res);
+    res.end();
+  } catch (err) {
+    if (err.durum === 403) {
+      return res.status(403).json({ hata_kodu: "YETKI_YOK", mesaj: err.message });
+    }
+    next(err);
+  }
+});
+
+
 // GET /api/v1/raporlar/santral/:santral_id/pdf
 router.get("/santral/:santral_id/pdf", requireRole(...RAPOR_ROLLERI), async (req, res, next) => {
   try {
