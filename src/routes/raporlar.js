@@ -167,14 +167,18 @@ async function santralRaporVerisiTopla(req, santral_id) {
   const santral = santralRows[0];
 
   const params = [santral_id];
-  let tarihKosulu = "";
+  let ekKosul = "";
   if (req.query.baslangic) {
     params.push(req.query.baslangic);
-    tarihKosulu += ` AND g.planlanan_tarih >= $${params.length}`;
+    ekKosul += ` AND g.planlanan_tarih >= $${params.length}`;
   }
   if (req.query.bitis) {
     params.push(req.query.bitis);
-    tarihKosulu += ` AND g.planlanan_tarih <= $${params.length}`;
+    ekKosul += ` AND g.planlanan_tarih <= $${params.length}`;
+  }
+  if (req.query.periyot) {
+    params.push(req.query.periyot);
+    ekKosul += ` AND bp.periyot = $${params.length}`;
   }
 
   const { rows: gorevler } = await req.db.query(
@@ -191,7 +195,7 @@ async function santralRaporVerisiTopla(req, santral_id) {
      JOIN kullanici atanan   ON atanan.kullanici_id = g.atanan_kullanici_id
      LEFT JOIN bakim_kaydi bk      ON bk.gorev_id = g.gorev_id
      LEFT JOIN kullanici tamamlayan ON tamamlayan.kullanici_id = bk.tamamlayan_kullanici_id
-     WHERE bp.santral_id = $1 ${tarihKosulu}
+     WHERE bp.santral_id = $1 ${ekKosul}
      ORDER BY g.planlanan_tarih DESC`,
     params
   );
@@ -210,6 +214,14 @@ async function santralRaporVerisiTopla(req, santral_id) {
 }
 
 const DURUM_ETIKETLERI = { TAMAMLANDI: "Tamamlandı", GECIKTI: "Gecikti", BEKLIYOR: "Bekliyor", DEVAM_EDIYOR: "Devam Ediyor" };
+const PERIYOT_ETIKETLERI = {
+  GUNLUK: "Günlük",
+  HAFTALIK: "Haftalık",
+  AYLIK: "Aylık",
+  UC_AYLIK: "3 Ayda Bir",
+  ALTI_AYLIK: "6 Ayda Bir",
+  YILLIK: "Yıllık",
+};
 
 function tarihFormatla(deger) {
   return deger ? new Date(deger).toLocaleDateString("tr-TR") : "—";
@@ -267,11 +279,12 @@ router.get("/santral/:santral_id/pdf", requireRole(...RAPOR_ROLLERI), async (req
             req.query.bitis ? tarihFormatla(req.query.bitis) : "…"
           }`
         : "Dönem: Tüm zamanlar";
+    const periyotMetni = req.query.periyot ? `   |   Bakım periyodu: ${PERIYOT_ETIKETLERI[req.query.periyot] || req.query.periyot}` : "";
     dokuman
       .font("DejaVu")
       .fontSize(8)
       .fillColor("#5b6b62")
-      .text(`${donemMetni}   |   Rapor tarihi: ${tarihFormatla(new Date())}`);
+      .text(`${donemMetni}${periyotMetni}   |   Rapor tarihi: ${tarihFormatla(new Date())}`);
     dokuman.moveDown(0.8);
     dokuman.strokeColor("#c17a24").lineWidth(1.5).moveTo(40, dokuman.y).lineTo(802, dokuman.y).stroke();
     dokuman.moveDown(0.6);
@@ -288,10 +301,10 @@ router.get("/santral/:santral_id/pdf", requireRole(...RAPOR_ROLLERI), async (req
 
     // Tablo
     const sutunlar = [
-      { baslik: "İşletme", genislik: 130 },
-      { baslik: "Bakım Adı", genislik: 230 },
-      { baslik: "Durum", genislik: 70 },
-      { baslik: "Personel", genislik: 110 },
+      { baslik: "İşletme", genislik: 95 },
+      { baslik: "Bakım Adı", genislik: 285 },
+      { baslik: "Durum", genislik: 78 },
+      { baslik: "Personel", genislik: 90 },
       { baslik: "Atama Tarihi", genislik: 75 },
       { baslik: "Tamamlama T.", genislik: 85 },
     ];
@@ -326,7 +339,7 @@ router.get("/santral/:santral_id/pdf", requireRole(...RAPOR_ROLLERI), async (req
         dokuman.addPage({ size: "A4", layout: "landscape", margin: 40 });
         y = 40;
       }
-      hucreYaz(santral.isletme_adi, 0, false);
+      hucreYaz(santral.ad, 0, false);
       hucreYaz(`${g.ekipman_adi} — ${g.bakim_adi}`, 1, false);
       hucreYaz(DURUM_ETIKETLERI[g.durum] || g.durum, 2, true, DURUM_RENK[g.durum] || "#13201c");
       hucreYaz(g.tamamlayan_personel || g.atanan_personel, 3, false);
@@ -382,7 +395,7 @@ router.get("/santral/:santral_id/excel", requireRole(...RAPOR_ROLLERI), async (r
     ];
     ozetSheet.getRow(1).font = { bold: true };
     ozetSheet.addRows([
-      { alan: "İşletme", deger: santral.isletme_adi },
+      { alan: "İşletme (Holding)", deger: santral.isletme_adi },
       { alan: "Santral", deger: santral.ad },
       {
         alan: "Dönem",
@@ -391,6 +404,7 @@ router.get("/santral/:santral_id/excel", requireRole(...RAPOR_ROLLERI), async (r
             ? `${tarihFormatla(req.query.baslangic) } – ${tarihFormatla(req.query.bitis)}`
             : "Tüm zamanlar",
       },
+      { alan: "Bakım periyodu", deger: req.query.periyot ? (PERIYOT_ETIKETLERI[req.query.periyot] || req.query.periyot) : "Tümü" },
       { alan: "Rapor tarihi", deger: tarihFormatla(new Date()) },
       { alan: "Toplam görev", deger: ozet.toplam_gorev },
       { alan: "Tamamlanan", deger: ozet.tamamlanan },
@@ -401,19 +415,17 @@ router.get("/santral/:santral_id/excel", requireRole(...RAPOR_ROLLERI), async (r
 
     const gorevSheet = workbook.addWorksheet("Bakım Kayıtları");
     gorevSheet.columns = [
-      { header: "İşletme", key: "isletme_adi", width: 22 },
-      { header: "Santral", key: "santral_adi", width: 16 },
-      { header: "Bakım Adı", key: "bakim_adi", width: 36 },
+      { header: "İşletme", key: "isletme_adi", width: 20 },
+      { header: "Bakım Adı", key: "bakim_adi", width: 42 },
       { header: "Durum", key: "durum", width: 14 },
-      { header: "Personel", key: "personel", width: 22 },
+      { header: "Personel", key: "personel", width: 20 },
       { header: "Atama Tarihi", key: "atama_tarihi", width: 14 },
       { header: "Tamamlama Tarihi", key: "tamamlama_tarihi", width: 16 },
     ];
     gorevSheet.getRow(1).font = { bold: true };
     gorevler.forEach((g) => {
       const satir = gorevSheet.addRow({
-        isletme_adi: santral.isletme_adi,
-        santral_adi: santral.ad,
+        isletme_adi: santral.ad,
         bakim_adi: `${g.ekipman_adi} — ${g.bakim_adi}`,
         durum: DURUM_ETIKETLERI[g.durum] || g.durum,
         personel: g.tamamlayan_personel || g.atanan_personel,
