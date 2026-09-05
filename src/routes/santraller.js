@@ -54,9 +54,10 @@ router.get("/:santral_id", async (req, res, next) => {
 });
 
 // GET /api/v1/santraller/:santral_id/atanabilir-kullanicilar — bu santralde
-// bakım görevi ATANABİLECEK kullanıcıları listeler (bu santrale erişimi olan
-// herkes: doğrudan atananlar + İşletme Admin + Platform Admin). Bakım planı
-// oluştururken "kime atansın" seçim kutusunu doldurmak için kullanılır.
+// bakım görevi ATANABİLECEK kullanıcıları listeler. Yalnızca fiilen sahada
+// bakımı yapacak roller (Saha Personeli, Santral Sorumlusu) döner — Platform
+// Admin/İşletme Admin gibi yönetici roller, santrale erişimleri olsa bile
+// bu listede görünmez (onlar görevi fiilen yapan ki değil, yöneten kişilerdir).
 router.get("/:santral_id/atanabilir-kullanicilar", async (req, res, next) => {
   try {
     const { rows } = await req.db.query(
@@ -66,6 +67,7 @@ router.get("/:santral_id/atanabilir-kullanicilar", async (req, res, next) => {
          SELECT kullanici_id FROM v_kullanici_yetkili_santraller WHERE santral_id = $1
        )
        AND k.aktif_mi = TRUE
+       AND k.rol IN ('SAHA_PERSONELI', 'SANTRAL_SORUMLUSU')
        ORDER BY k.ad_soyad`,
       [req.params.santral_id]
     );
