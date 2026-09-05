@@ -123,7 +123,22 @@ router.post(
           sorumlu_kullanici_id || null,
         ]
       );
-      res.status(201).json(rows[0]);
+      const yeniPlan = rows[0];
+
+      // İlk görevi ANINDA üretiyoruz — aksi halde ertesi gün otomatik
+      // zamanlayıcı çalışana kadar (GitHub Actions, günde bir kez) atanan
+      // kullanıcının "Görevlerim" listesinde hiçbir şey görünmezdi.
+      if (sorumlu_kullanici_id) {
+        const bugunKucukEsitMi = new Date(baslangic_tarihi) <= new Date(new Date().toDateString());
+        await req.db.query(
+          `INSERT INTO bakim_gorevi (plan_id, atanan_kullanici_id, planlanan_tarih, durum)
+           VALUES ($1, $2, $3, $4)
+           ON CONFLICT (plan_id, planlanan_tarih) DO NOTHING`,
+          [yeniPlan.plan_id, sorumlu_kullanici_id, baslangic_tarihi, bugunKucukEsitMi ? "GECIKTI" : "BEKLIYOR"]
+        );
+      }
+
+      res.status(201).json(yeniPlan);
     } catch (err) {
       // periyot enum'a uymuyorsa PostgreSQL 22P02/23514 türü hata döner —
       // burada kullanıcıya anlamlı bir mesaj göstermek için yakalıyoruz.
@@ -165,6 +180,18 @@ router.patch("/bakim-planlari/:plan_id", requireRole(...YONETICI_ROLLERI), async
       `UPDATE bakim_plani SET ${setIfadesi} WHERE plan_id = $${guncellenecekler.length + 1} RETURNING *`,
       [...degerler, req.params.plan_id]
     );
+
+    // Sorumlu değiştiyse, henüz tamamlanmamış (BEKLIYOR/GECIKTI) görevleri de
+    // ANINDA yeni sorumluya devret — aksi halde eski sorumlunun üzerinde
+    // kalmaya devam ederdi, yeni sorumlunun listesinde hiç görünmezdi.
+    if (req.body.sorumlu_kullanici_id) {
+      await req.db.query(
+        `UPDATE bakim_gorevi SET atanan_kullanici_id = $1
+         WHERE plan_id = $2 AND durum IN ('BEKLIYOR', 'GECIKTI')`,
+        [req.body.sorumlu_kullanici_id, req.params.plan_id]
+      );
+    }
+
     res.json(rows[0]);
   } catch (err) {
     next(err);
