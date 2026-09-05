@@ -162,6 +162,25 @@ router.patch(
         return res.status(400).json({ hata_kodu: "EKSIK_ALAN", mesaj: "Güncellenecek en az bir alan gönderilmeli." });
       }
 
+      // Platform Admin (ADMIN) rolünü yalnızca mevcut bir Platform Admin
+      // atayabilir/değiştirebilir — bir İşletme Admin başka birini Platform
+      // Admin yapamaz, mevcut bir Platform Admin'in rolünü de düşüremez.
+      if (req.body.rol === "ADMIN" && req.user.rol !== "ADMIN") {
+        return res.status(403).json({
+          hata_kodu: "YETKI_YOK",
+          mesaj: "Platform Admin rolünü yalnızca mevcut bir Platform Admin atayabilir.",
+        });
+      }
+      const { rows: hedefRows } = await req.db.query(`SELECT rol FROM kullanici WHERE kullanici_id = $1`, [
+        req.params.kullanici_id,
+      ]);
+      if (hedefRows[0]?.rol === "ADMIN" && req.user.rol !== "ADMIN") {
+        return res.status(403).json({
+          hata_kodu: "YETKI_YOK",
+          mesaj: "Bir Platform Admin'in bilgilerini yalnızca başka bir Platform Admin değiştirebilir.",
+        });
+      }
+
       const setIfadesi = guncellenecekler.map((alan, i) => `${alan} = $${i + 1}`).join(", ");
       const degerler = guncellenecekler.map((alan) => req.body[alan]);
 
