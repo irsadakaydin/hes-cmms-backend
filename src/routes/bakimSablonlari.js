@@ -7,18 +7,39 @@ router.use(requireAuth, withDbContext);
 
 const SABLON_YONETICI_ROLLERI = ["ISLETME_ADMIN", "ADMIN"];
 
-// GET /api/v1/bakim-sablonlari — tüm aktif şablonları listeler (?ekipman_tipi= ile filtrelenebilir)
+/** Platform Admin (ADMIN) her holdingi görür; diğerleri yalnızca kendi işletmesini. */
+function platformAdminMi(req) {
+  return req.user.rol === "ADMIN";
+}
+
+// GET /api/v1/bakim-sablonlari — aktif şablonları listeler
+// (?ekipman_tipi= ile filtrelenebilir; Platform Admin isteğe bağlı ?isletme_id= ile tek bir holdinge bakabilir)
 router.get("/", async (req, res, next) => {
   try {
-    const { ekipman_tipi } = req.query;
+    const { ekipman_tipi, isletme_id } = req.query;
     const params = [];
-    let sorgu = `SELECT sablon_id, ad, ekipman_tipi, periyot_tipi, versiyon, aktif_mi, olusturma_tarihi
-                 FROM bakim_sablonu WHERE aktif_mi = TRUE`;
+    let sorgu = `SELECT bs.sablon_id, bs.ad, bs.ekipman_tipi, bs.periyot_tipi, bs.versiyon, bs.aktif_mi,
+                        bs.olusturma_tarihi, bs.isletme_id, i.ad AS isletme_adi
+                 FROM bakim_sablonu bs
+                 JOIN isletme i ON i.isletme_id = bs.isletme_id
+                 WHERE bs.aktif_mi = TRUE`;
+
+    if (platformAdminMi(req)) {
+      if (isletme_id) {
+        params.push(isletme_id);
+        sorgu += ` AND bs.isletme_id = $${params.length}`;
+      }
+      // isletme_id belirtilmezse Platform Admin TÜM holdinglerin şablonlarını görür
+    } else {
+      params.push(req.user.isletme_id);
+      sorgu += ` AND bs.isletme_id = $${params.length}`;
+    }
+
     if (ekipman_tipi) {
       params.push(ekipman_tipi);
-      sorgu += ` AND ekipman_tipi = $${params.length}`;
+      sorgu += ` AND bs.ekipman_tipi = $${params.length}`;
     }
-    sorgu += ` ORDER BY ad`;
+    sorgu += ` ORDER BY i.ad, bs.ad`;
 
     const { rows } = await req.db.query(sorgu, params);
     res.json({ veri: rows });
@@ -33,16 +54,22 @@ router.get("/:sablon_id", async (req, res, next) => {
     const { rows } = await req.db.query(`SELECT * FROM bakim_sablonu WHERE sablon_id = $1`, [
       req.params.sablon_id,
     ]);
-    if (!rows[0]) {
+    const sablon = rows[0];
+    if (!sablon) {
       return res.status(404).json({ hata_kodu: "SABLON_BULUNAMADI", mesaj: "Bakım şablonu bulunamadı." });
     }
-    res.json(rows[0]);
+    if (!platformAdminMi(req) && sablon.isletme_id !== req.user.isletme_id) {
+      return res.status(403).json({ hata_kodu: "YETKI_YOK", mesaj: "Bu şablona erişim yetkiniz yok." });
+    }
+    res.json(sablon);
   } catch (err) {
     next(err);
   }
 });
 
 // POST /api/v1/bakim-sablonlari — yeni şablon oluşturur (föy dijitalleştirme)
+// Platform Admin isteğe bağlı isletme_id belirtebilir (hangi holding için); diğerleri
+// her zaman kendi holdingi için oluşturur.
 router.post("/", requireRole(...SABLON_YONETICI_ROLLERI), async (req, res, next) => {
   try {
     const { ad, ekipman_tipi, periyot_tipi, checklist_json } = req.body;
@@ -53,11 +80,14 @@ router.post("/", requireRole(...SABLON_YONETICI_ROLLERI), async (req, res, next)
       });
     }
 
+    const hedefIsletmeId =
+      platformAdminMi(req) && req.body.isletme_id ? req.body.isletme_id : req.user.isletme_id;
+
     const { rows } = await req.db.query(
-      `INSERT INTO bakim_sablonu (ad, ekipman_tipi, periyot_tipi, checklist_json, olusturan_kullanici_id)
-       VALUES ($1, $2, $3, $4, $5)
+      `INSERT INTO bakim_sablonu (ad, ekipman_tipi, periyot_tipi, checklist_json, olusturan_kullanici_id, isletme_id)
+       VALUES ($1, $2, $3, $4, $5, $6)
        RETURNING *`,
-      [ad, ekipman_tipi, periyot_tipi, JSON.stringify(checklist_json), req.user.kullanici_id]
+      [ad, ekipman_tipi, periyot_tipi, JSON.stringify(checklist_json), req.user.kullanici_id, hedefIsletmeId]
     );
     res.status(201).json(rows[0]);
   } catch (err) {
@@ -81,6 +111,9 @@ router.patch("/:sablon_id", requireRole(...SABLON_YONETICI_ROLLERI), async (req,
     if (!eski) {
       return res.status(404).json({ hata_kodu: "SABLON_BULUNAMADI", mesaj: "Bakım şablonu bulunamadı." });
     }
+    if (!platformAdminMi(req) && eski.isletme_id !== req.user.isletme_id) {
+      return res.status(403).json({ hata_kodu: "YETKI_YOK", mesaj: "Bu şablona erişim yetkiniz yok." });
+    }
 
     const ad = req.body.ad ?? eski.ad;
     const ekipman_tipi = req.body.ekipman_tipi ?? eski.ekipman_tipi;
@@ -93,10 +126,10 @@ router.patch("/:sablon_id", requireRole(...SABLON_YONETICI_ROLLERI), async (req,
     await req.db.query(`UPDATE bakim_sablonu SET aktif_mi = FALSE WHERE sablon_id = $1`, [eski.sablon_id]);
 
     const { rows: yeniRows } = await req.db.query(
-      `INSERT INTO bakim_sablonu (ad, ekipman_tipi, periyot_tipi, checklist_json, versiyon, olusturan_kullanici_id)
-       VALUES ($1, $2, $3, $4, $5, $6)
+      `INSERT INTO bakim_sablonu (ad, ekipman_tipi, periyot_tipi, checklist_json, versiyon, olusturan_kullanici_id, isletme_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
        RETURNING *`,
-      [ad, ekipman_tipi, periyot_tipi, checklist_json, eski.versiyon + 1, req.user.kullanici_id]
+      [ad, ekipman_tipi, periyot_tipi, checklist_json, eski.versiyon + 1, req.user.kullanici_id, eski.isletme_id]
     );
     await req.db.query("COMMIT");
 
@@ -111,6 +144,7 @@ router.patch("/:sablon_id", requireRole(...SABLON_YONETICI_ROLLERI), async (req,
 });
 
 // POST /api/v1/bakim-sablonlari/:sablon_id/kopyala — mevcut şablondan yeni bir tane türetir
+// (kopya, kaynağın ait olduğu holding içinde kalır)
 router.post("/:sablon_id/kopyala", requireRole(...SABLON_YONETICI_ROLLERI), async (req, res, next) => {
   try {
     const { rows: kaynakRows } = await req.db.query(`SELECT * FROM bakim_sablonu WHERE sablon_id = $1`, [
@@ -120,14 +154,24 @@ router.post("/:sablon_id/kopyala", requireRole(...SABLON_YONETICI_ROLLERI), asyn
     if (!kaynak) {
       return res.status(404).json({ hata_kodu: "SABLON_BULUNAMADI", mesaj: "Kaynak şablon bulunamadı." });
     }
+    if (!platformAdminMi(req) && kaynak.isletme_id !== req.user.isletme_id) {
+      return res.status(403).json({ hata_kodu: "YETKI_YOK", mesaj: "Bu şablona erişim yetkiniz yok." });
+    }
 
     const yeniAd = req.body.ad || `${kaynak.ad} (kopya)`;
 
     const { rows } = await req.db.query(
-      `INSERT INTO bakim_sablonu (ad, ekipman_tipi, periyot_tipi, checklist_json, olusturan_kullanici_id)
-       VALUES ($1, $2, $3, $4, $5)
+      `INSERT INTO bakim_sablonu (ad, ekipman_tipi, periyot_tipi, checklist_json, olusturan_kullanici_id, isletme_id)
+       VALUES ($1, $2, $3, $4, $5, $6)
        RETURNING *`,
-      [yeniAd, kaynak.ekipman_tipi, kaynak.periyot_tipi, JSON.stringify(kaynak.checklist_json), req.user.kullanici_id]
+      [
+        yeniAd,
+        kaynak.ekipman_tipi,
+        kaynak.periyot_tipi,
+        JSON.stringify(kaynak.checklist_json),
+        req.user.kullanici_id,
+        kaynak.isletme_id,
+      ]
     );
     res.status(201).json(rows[0]);
   } catch (err) {

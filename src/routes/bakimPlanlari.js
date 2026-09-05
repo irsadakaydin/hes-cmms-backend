@@ -94,6 +94,20 @@ router.post(
         });
       }
 
+      // Şablon, santralin bağlı olduğu holding (işletme) dışından seçilmiş olmasın
+      const { rows: sablonRows } = await req.db.query(
+        `SELECT bs.sablon_id FROM bakim_sablonu bs
+         JOIN santral s ON s.isletme_id = bs.isletme_id
+         WHERE bs.sablon_id = $1 AND s.santral_id = $2`,
+        [sablon_id, santral_id]
+      );
+      if (!sablonRows[0]) {
+        return res.status(400).json({
+          hata_kodu: "GECERSIZ_SABLON",
+          mesaj: "Belirtilen bakım şablonu bu santralin bağlı olduğu holdinge ait değil.",
+        });
+      }
+
       const { rows } = await req.db.query(
         `INSERT INTO bakim_plani
            (santral_id, ekipman_id, sablon_id, periyot, baslangic_tarihi, bitis_tarihi, sorumlu_kullanici_id)
