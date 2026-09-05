@@ -28,8 +28,9 @@ router.get("/", async (req, res, next) => {
 router.get("/:santral_id", async (req, res, next) => {
   try {
     const { rows } = await req.db.query(
-      `SELECT s.*
+      `SELECT s.*, i.ad AS isletme_adi
        FROM santral s
+       JOIN isletme i ON i.isletme_id = s.isletme_id
        WHERE s.santral_id = $1
          AND s.santral_id IN (
            SELECT santral_id FROM v_kullanici_yetkili_santraller WHERE kullanici_id = $2
