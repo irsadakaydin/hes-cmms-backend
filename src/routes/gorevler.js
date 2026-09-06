@@ -1,6 +1,7 @@
 const express = require("express");
 const { requireAuth } = require("../middleware/auth");
 const { withDbContext } = require("../middleware/dbContext");
+const { dataUrlYukle } = require("../supabaseStorage");
 
 const router = express.Router();
 
@@ -75,6 +76,20 @@ router.post("/:gorev_id/kaydi-tamamla", async (req, res, next) => {
     });
   }
 
+  // Fotoğraf/imza yüklemelerini veritabanı işlemi (transaction) BAŞLAMADAN
+  // ÖNCE yapıyoruz — ağ isteği süresince bir veritabanı bağlantısını
+  // kilitli tutmamak için. Supabase Storage yapılandırılmamışsa bu
+  // fonksiyon değeri aynen (base64 olarak) geri döner, davranış değişmez.
+  let yuklenmisImzaUrl, yuklenmisFotograflar;
+  try {
+    yuklenmisImzaUrl = await dataUrlYukle(imza_url, "imzalar");
+    yuklenmisFotograflar = await Promise.all(
+      (fotograf_urlleri || []).map((f) => dataUrlYukle(f, "fotograflar"))
+    );
+  } catch (err) {
+    return next(err);
+  }
+
   try {
     await req.db.query("BEGIN");
 
@@ -117,8 +132,8 @@ router.post("/:gorev_id/kaydi-tamamla", async (req, res, next) => {
         req.user.kullanici_id,
         JSON.stringify(checklist_sonuclari),
         notlar || null,
-        fotograf_urlleri || [],
-        imza_url,
+        yuklenmisFotograflar,
+        yuklenmisImzaUrl,
       ]
     );
 
