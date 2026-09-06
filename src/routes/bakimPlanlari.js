@@ -60,14 +60,18 @@ router.get("/santraller/:santral_id/bakim-planlari", async (req, res, next) => {
       [req.params.santral_id]
     );
 
-    // İsteğe bağlı tarih aralığı filtresi — yalnızca DEVAM_EDEN ve
-    // TAMAMLANAN kategorilerine uygulanır; GECIKEN ve DURDURULAN her zaman
-    // görünür (bunlar "şu an geçerli durum" bilgisidir, belirli bir tarihe
-    // bağlı değildir).
+    // İsteğe bağlı tarih aralığı filtresi — yalnızca TAMAMLANAN kategorisine
+    // uygulanır (belirli bir dönemde tamamlanmış bakımları görmek için).
+    // DEVAM_EDEN, GECİKEN ve DURDURULAN her zaman görünür — bunlar "şu an
+    // geçerli durum" bilgisidir, belirli bir tarihe bağlı değildir.
     let sonuclar = rows;
     if (req.query.baslangic || req.query.bitis) {
       sonuclar = rows.filter((p) => {
-        if (p.kategori === "GECIKEN" || p.kategori === "DURDURULAN") return true;
+        // Yalnızca TAMAMLANAN bir tarih aralığına göre süzülür (o tamamlanma
+        // döneminin raporunu görmek isteyebilirsiniz). DEVAM_EDEN, GECİKEN
+        // ve DURDURULAN, tarihten bağımsız GÜNCEL bir durumdur — o anda kaç
+        // tanesi varsa her zaman o kadar görünür.
+        if (p.kategori !== "TAMAMLANAN") return true;
         if (!p.son_donem_tarihi) return true;
         const tarih = new Date(p.son_donem_tarihi);
         if (req.query.baslangic && tarih < new Date(req.query.baslangic)) return false;
