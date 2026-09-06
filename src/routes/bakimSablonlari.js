@@ -221,6 +221,19 @@ router.post("/:sablon_id/kopyala", requireRole("ADMIN"), async (req, res, next) 
       platformAdminMi(req) && req.body.hedef_isletme_id ? req.body.hedef_isletme_id : req.user.isletme_id;
     const yeniAd = req.body.ad || kaynak.ad;
 
+    // Hedef holdingde AYNI İSİMDE zaten aktif bir şablon varsa mükerrer
+    // kopyalamayı engelle.
+    const { rows: mevcutRows } = await req.db.query(
+      `SELECT sablon_id FROM bakim_sablonu WHERE isletme_id = $1 AND ad = $2 AND aktif_mi = TRUE`,
+      [hedefIsletmeId, yeniAd]
+    );
+    if (mevcutRows[0]) {
+      return res.status(409).json({
+        hata_kodu: "SABLON_ZATEN_VAR",
+        mesaj: "Bu Bakım Şablonu Kayıtlarınızda Var",
+      });
+    }
+
     // Kaynağın santral bağlantısı hedef holdingde ANLAMSIZ (farklı santral
     // kimlikleri) — kopya varsayılan olarak holding geneli (santral_id=NULL)
     // olur; istenirse hedef holdinge ait geçerli bir santral belirtilebilir.
