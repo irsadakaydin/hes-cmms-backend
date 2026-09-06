@@ -5,24 +5,30 @@ const { withDbContext } = require("../middleware/dbContext");
 const router = express.Router();
 router.use(requireAuth, withDbContext);
 
-const SABLON_YONETICI_ROLLERI = ["ISLETME_ADMIN", "ADMIN"];
+const SABLON_YONETICI_ROLLERI = ["SANTRAL_SORUMLUSU", "ISLETME_ADMIN", "ADMIN"];
 
 /** Platform Admin (ADMIN) her holdingi görür; diğerleri yalnızca kendi işletmesini. */
 function platformAdminMi(req) {
   return req.user.rol === "ADMIN";
 }
 
-// GET /api/v1/bakim-sablonlari — aktif şablonları listeler
+// GET /api/v1/bakim-sablonlari — varsayılan olarak yalnızca aktif şablonları
+// listeler (bakım planı oluştururken kullanılan seçim içindir — eski/pasif
+// bir şablonun yeni bir plana atanmasını önler). Yönetim sayfası (Bakım
+// Şablonları) ?hepsi=1 göndererek pasifleştirilmiş olanları da görebilir.
 // (?ekipman_tipi= ile filtrelenebilir; Platform Admin isteğe bağlı ?isletme_id= ile tek bir holdinge bakabilir)
 router.get("/", async (req, res, next) => {
   try {
-    const { ekipman_tipi, isletme_id } = req.query;
+    const { ekipman_tipi, isletme_id, hepsi } = req.query;
     const params = [];
     let sorgu = `SELECT bs.sablon_id, bs.ad, bs.ekipman_tipi, bs.periyot_tipi, bs.versiyon, bs.aktif_mi,
                         bs.olusturma_tarihi, bs.isletme_id, i.ad AS isletme_adi
                  FROM bakim_sablonu bs
                  JOIN isletme i ON i.isletme_id = bs.isletme_id
-                 WHERE bs.aktif_mi = TRUE`;
+                 WHERE 1=1`;
+    if (!hepsi) {
+      sorgu += ` AND bs.aktif_mi = TRUE`;
+    }
 
     if (platformAdminMi(req)) {
       if (isletme_id) {
@@ -178,5 +184,94 @@ router.post("/:sablon_id/kopyala", requireRole(...SABLON_YONETICI_ROLLERI), asyn
     next(err);
   }
 });
+
+// POST /api/v1/bakim-sablonlari/:sablon_id/pasiflestir — kütüphaneden gizler
+// (versiyon geçmişini bozmaz, yalnızca aktif_mi=false yapar)
+router.post(
+  "/:sablon_id/pasiflestir",
+  requireRole(...SABLON_YONETICI_ROLLERI),
+  async (req, res, next) => {
+    try {
+      const { rows: mevcutRows } = await req.db.query(`SELECT isletme_id FROM bakim_sablonu WHERE sablon_id = $1`, [
+        req.params.sablon_id,
+      ]);
+      if (!mevcutRows[0]) {
+        return res.status(404).json({ hata_kodu: "SABLON_BULUNAMADI", mesaj: "Bakım şablonu bulunamadı." });
+      }
+      if (!platformAdminMi(req) && mevcutRows[0].isletme_id !== req.user.isletme_id) {
+        return res.status(403).json({ hata_kodu: "YETKI_YOK", mesaj: "Bu şablona erişim yetkiniz yok." });
+      }
+      const { rows } = await req.db.query(
+        `UPDATE bakim_sablonu SET aktif_mi = FALSE WHERE sablon_id = $1 RETURNING *`,
+        [req.params.sablon_id]
+      );
+      res.json({ mesaj: "Şablon pasifleştirildi.", sablon: rows[0] });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// POST /api/v1/bakim-sablonlari/:sablon_id/aktiflestir
+router.post(
+  "/:sablon_id/aktiflestir",
+  requireRole(...SABLON_YONETICI_ROLLERI),
+  async (req, res, next) => {
+    try {
+      const { rows: mevcutRows } = await req.db.query(`SELECT isletme_id FROM bakim_sablonu WHERE sablon_id = $1`, [
+        req.params.sablon_id,
+      ]);
+      if (!mevcutRows[0]) {
+        return res.status(404).json({ hata_kodu: "SABLON_BULUNAMADI", mesaj: "Bakım şablonu bulunamadı." });
+      }
+      if (!platformAdminMi(req) && mevcutRows[0].isletme_id !== req.user.isletme_id) {
+        return res.status(403).json({ hata_kodu: "YETKI_YOK", mesaj: "Bu şablona erişim yetkiniz yok." });
+      }
+      const { rows } = await req.db.query(
+        `UPDATE bakim_sablonu SET aktif_mi = TRUE WHERE sablon_id = $1 RETURNING *`,
+        [req.params.sablon_id]
+      );
+      res.json({ mesaj: "Şablon yeniden aktifleştirildi.", sablon: rows[0] });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// DELETE /api/v1/bakim-sablonlari/:sablon_id — yalnızca hiçbir bakım planı
+// bu şablonu kullanmıyorsa gerçekten silinir.
+router.delete(
+  "/:sablon_id",
+  requireRole(...SABLON_YONETICI_ROLLERI),
+  async (req, res, next) => {
+    try {
+      const { rows: mevcutRows } = await req.db.query(`SELECT isletme_id FROM bakim_sablonu WHERE sablon_id = $1`, [
+        req.params.sablon_id,
+      ]);
+      if (!mevcutRows[0]) {
+        return res.status(404).json({ hata_kodu: "SABLON_BULUNAMADI", mesaj: "Bakım şablonu bulunamadı." });
+      }
+      if (!platformAdminMi(req) && mevcutRows[0].isletme_id !== req.user.isletme_id) {
+        return res.status(403).json({ hata_kodu: "YETKI_YOK", mesaj: "Bu şablona erişim yetkiniz yok." });
+      }
+
+      const { rows: planSayimRows } = await req.db.query(
+        `SELECT COUNT(*) AS sayi FROM bakim_plani WHERE sablon_id = $1`,
+        [req.params.sablon_id]
+      );
+      if (Number(planSayimRows[0].sayi) > 0) {
+        return res.status(409).json({
+          hata_kodu: "SABLON_KULLANIMDA",
+          mesaj: `Bu şablon ${planSayimRows[0].sayi} bakım planı tarafından kullanılıyor, silinemez. Bunun yerine pasifleştirin.`,
+        });
+      }
+
+      await req.db.query(`DELETE FROM bakim_sablonu WHERE sablon_id = $1`, [req.params.sablon_id]);
+      res.json({ mesaj: "Bakım şablonu silindi." });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
 
 module.exports = router;
