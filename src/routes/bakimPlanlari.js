@@ -36,7 +36,14 @@ router.get("/santraller/:santral_id/bakim-planlari", async (req, res, next) => {
          ) AS sorumlular,
          sd.son_tarih AS son_donem_tarihi,
          sonuc.toplam AS son_donem_toplam,
-         sonuc.tamamlanan AS son_donem_tamamlanan
+         sonuc.tamamlanan AS son_donem_tamamlanan,
+         COALESCE(sonuc.geciken, 0) AS son_donem_geciken,
+         CASE
+           WHEN NOT bp.aktif_mi THEN 'DURDURULAN'
+           WHEN COALESCE(sonuc.toplam, 0) > 0 AND sonuc.tamamlanan = sonuc.toplam THEN 'TAMAMLANAN'
+           WHEN COALESCE(sonuc.geciken, 0) > 0 THEN 'GECIKEN'
+           ELSE 'DEVAM_EDEN'
+         END AS kategori
        FROM bakim_plani bp
        JOIN ekipman e        ON e.ekipman_id = bp.ekipman_id
        JOIN bakim_sablonu bs ON bs.sablon_id = bp.sablon_id
@@ -44,14 +51,32 @@ router.get("/santraller/:santral_id/bakim-planlari", async (req, res, next) => {
          SELECT MAX(planlanan_tarih) AS son_tarih FROM bakim_gorevi WHERE plan_id = bp.plan_id
        ) sd ON true
        LEFT JOIN LATERAL (
-         SELECT COUNT(*) AS toplam, COUNT(*) FILTER (WHERE durum = 'TAMAMLANDI') AS tamamlanan
+         SELECT COUNT(*) AS toplam, COUNT(*) FILTER (WHERE durum = 'TAMAMLANDI') AS tamamlanan,
+                COUNT(*) FILTER (WHERE durum = 'GECIKTI') AS geciken
          FROM bakim_gorevi WHERE plan_id = bp.plan_id AND planlanan_tarih = sd.son_tarih
        ) sonuc ON true
        WHERE bp.santral_id = $1
        ORDER BY bp.aktif_mi DESC, bp.baslangic_tarihi DESC`,
       [req.params.santral_id]
     );
-    res.json({ veri: rows });
+
+    // İsteğe bağlı tarih aralığı filtresi — yalnızca DEVAM_EDEN ve
+    // TAMAMLANAN kategorilerine uygulanır; GECIKEN ve DURDURULAN her zaman
+    // görünür (bunlar "şu an geçerli durum" bilgisidir, belirli bir tarihe
+    // bağlı değildir).
+    let sonuclar = rows;
+    if (req.query.baslangic || req.query.bitis) {
+      sonuclar = rows.filter((p) => {
+        if (p.kategori === "GECIKEN" || p.kategori === "DURDURULAN") return true;
+        if (!p.son_donem_tarihi) return true;
+        const tarih = new Date(p.son_donem_tarihi);
+        if (req.query.baslangic && tarih < new Date(req.query.baslangic)) return false;
+        if (req.query.bitis && tarih > new Date(`${req.query.bitis}T23:59:59`)) return false;
+        return true;
+      });
+    }
+
+    res.json({ veri: sonuclar });
   } catch (err) {
     next(err);
   }
