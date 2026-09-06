@@ -226,4 +226,70 @@ router.post(
   }
 );
 
+// POST /api/v1/bakim-planlari/:plan_id/aktiflestir — durdurulmuş planı yeniden başlatır
+router.post(
+  "/bakim-planlari/:plan_id/aktiflestir",
+  requireRole(...YONETICI_ROLLERI),
+  async (req, res, next) => {
+    try {
+      const { rows: mevcutRows } = await req.db.query(
+        `SELECT santral_id FROM bakim_plani WHERE plan_id = $1`,
+        [req.params.plan_id]
+      );
+      if (!mevcutRows[0]) {
+        return res.status(404).json({ hata_kodu: "PLAN_BULUNAMADI", mesaj: "Bakım planı bulunamadı." });
+      }
+      if (!(await santralErisimVarMi(req, mevcutRows[0].santral_id))) {
+        return res.status(403).json({ hata_kodu: "YETKI_YOK", mesaj: "Bu plana erişim yetkiniz yok." });
+      }
+
+      const { rows } = await req.db.query(
+        `UPDATE bakim_plani SET aktif_mi = TRUE WHERE plan_id = $1 RETURNING *`,
+        [req.params.plan_id]
+      );
+      res.json({ mesaj: "Bakım planı yeniden aktifleştirildi.", plan: rows[0] });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// DELETE /api/v1/bakim-planlari/:plan_id — yalnızca hiç görev üretilmemişse
+// gerçekten silinir; görev geçmişi varsa (tamamlanmış kayıtlar dahil) veri
+// kaybını önlemek için reddedilir, "durdur" kullanılması önerilir.
+router.delete(
+  "/bakim-planlari/:plan_id",
+  requireRole(...YONETICI_ROLLERI),
+  async (req, res, next) => {
+    try {
+      const { rows: mevcutRows } = await req.db.query(
+        `SELECT santral_id FROM bakim_plani WHERE plan_id = $1`,
+        [req.params.plan_id]
+      );
+      if (!mevcutRows[0]) {
+        return res.status(404).json({ hata_kodu: "PLAN_BULUNAMADI", mesaj: "Bakım planı bulunamadı." });
+      }
+      if (!(await santralErisimVarMi(req, mevcutRows[0].santral_id))) {
+        return res.status(403).json({ hata_kodu: "YETKI_YOK", mesaj: "Bu plana erişim yetkiniz yok." });
+      }
+
+      const { rows: gorevSayimRows } = await req.db.query(
+        `SELECT COUNT(*) AS sayi FROM bakim_gorevi WHERE plan_id = $1`,
+        [req.params.plan_id]
+      );
+      if (Number(gorevSayimRows[0].sayi) > 0) {
+        return res.status(409).json({
+          hata_kodu: "PLAN_GECMISI_VAR",
+          mesaj: `Bu plana ait ${gorevSayimRows[0].sayi} görev kaydı var. Geçmişi korumak için silinemez — bunun yerine "durdur" kullanın.`,
+        });
+      }
+
+      await req.db.query(`DELETE FROM bakim_plani WHERE plan_id = $1`, [req.params.plan_id]);
+      res.json({ mesaj: "Bakım planı silindi." });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
 module.exports = router;
