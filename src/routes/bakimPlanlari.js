@@ -33,10 +33,20 @@ router.get("/santraller/:santral_id/bakim-planlari", async (req, res, next) => {
             JOIN kullanici k ON k.kullanici_id = bps.kullanici_id
             WHERE bps.plan_id = bp.plan_id),
            '[]'
-         ) AS sorumlular
+         ) AS sorumlular,
+         sd.son_tarih AS son_donem_tarihi,
+         sonuc.toplam AS son_donem_toplam,
+         sonuc.tamamlanan AS son_donem_tamamlanan
        FROM bakim_plani bp
        JOIN ekipman e        ON e.ekipman_id = bp.ekipman_id
        JOIN bakim_sablonu bs ON bs.sablon_id = bp.sablon_id
+       LEFT JOIN LATERAL (
+         SELECT MAX(planlanan_tarih) AS son_tarih FROM bakim_gorevi WHERE plan_id = bp.plan_id
+       ) sd ON true
+       LEFT JOIN LATERAL (
+         SELECT COUNT(*) AS toplam, COUNT(*) FILTER (WHERE durum = 'TAMAMLANDI') AS tamamlanan
+         FROM bakim_gorevi WHERE plan_id = bp.plan_id AND planlanan_tarih = sd.son_tarih
+       ) sonuc ON true
        WHERE bp.santral_id = $1
        ORDER BY bp.aktif_mi DESC, bp.baslangic_tarihi DESC`,
       [req.params.santral_id]

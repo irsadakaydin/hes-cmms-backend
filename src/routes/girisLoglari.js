@@ -70,6 +70,7 @@ async function girisKayitlariniTopla(req) {
   }
 
   const whereIfadesi = kosullar.length > 0 ? `WHERE ${kosullar.join(" AND ")}` : "";
+  const limit = Math.min(Number(req.query.limit) || 1000, 1000);
 
   const { rows } = await req.db.query(
     `SELECT g.kayit_id, g.giris_tarihi, g.ip_adresi,
@@ -79,7 +80,7 @@ async function girisKayitlariniTopla(req) {
      JOIN isletme i ON i.isletme_id = k.isletme_id
      ${whereIfadesi}
      ORDER BY g.giris_tarihi DESC
-     LIMIT 1000`,
+     LIMIT ${limit}`,
     params
   );
   return rows;
