@@ -122,13 +122,40 @@ router.patch("/ekipmanlar/:ekipman_id", requireRole(...YONETICI_ROLLERI), async 
   }
 });
 
-// DELETE /api/v1/ekipmanlar/:ekipman_id — soft delete (durum = HURDA)
-router.delete("/ekipmanlar/:ekipman_id", requireRole(...YONETICI_ROLLERI), async (req, res, next) => {
+// POST /api/v1/ekipmanlar/:ekipman_id/pasiflestir — ekipmanı listelerden
+// gizler ama geçmişini (bakım planı/kaydı) korur. Tüm yönetici roller
+// (Santral Sorumlusu dahil) kullanabilir.
+router.post("/ekipmanlar/:ekipman_id/pasiflestir", requireRole(...YONETICI_ROLLERI), async (req, res, next) => {
   try {
-    const { rows: mevcutRows } = await req.db.query(
-      `SELECT santral_id FROM ekipman WHERE ekipman_id = $1`,
+    const { rows: mevcutRows } = await req.db.query(`SELECT santral_id FROM ekipman WHERE ekipman_id = $1`, [
+      req.params.ekipman_id,
+    ]);
+    if (!mevcutRows[0]) {
+      return res.status(404).json({ hata_kodu: "EKIPMAN_BULUNAMADI", mesaj: "Ekipman bulunamadı." });
+    }
+    if (!(await santralErisimVarMi(req, mevcutRows[0].santral_id))) {
+      return res.status(403).json({ hata_kodu: "YETKI_YOK", mesaj: "Bu ekipmana erişim yetkiniz yok." });
+    }
+    const { rows } = await req.db.query(
+      `UPDATE ekipman SET durum = 'HURDA' WHERE ekipman_id = $1 RETURNING *`,
       [req.params.ekipman_id]
     );
+    res.json({ mesaj: "Ekipman pasifleştirildi.", ekipman: rows[0] });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// DELETE /api/v1/ekipmanlar/:ekipman_id — KALICI silme. Yalnızca GM ve
+// İşletme Admin kullanabilir (Santral Sorumlusu yalnızca pasifleştirebilir).
+// Bu ekipmana ait bir bakım planı varsa (geçmişi/görev kaydı olsun ya da
+// olmasın) veri kaybını önlemek için reddedilir — önce o planların
+// silinmesi/kaldırılması, ya da yalnızca pasifleştirme kullanılması gerekir.
+router.delete("/ekipmanlar/:ekipman_id", requireRole("ISLETME_ADMIN", "ADMIN"), async (req, res, next) => {
+  try {
+    const { rows: mevcutRows } = await req.db.query(`SELECT santral_id FROM ekipman WHERE ekipman_id = $1`, [
+      req.params.ekipman_id,
+    ]);
     if (!mevcutRows[0]) {
       return res.status(404).json({ hata_kodu: "EKIPMAN_BULUNAMADI", mesaj: "Ekipman bulunamadı." });
     }
@@ -136,11 +163,19 @@ router.delete("/ekipmanlar/:ekipman_id", requireRole(...YONETICI_ROLLERI), async
       return res.status(403).json({ hata_kodu: "YETKI_YOK", mesaj: "Bu ekipmana erişim yetkiniz yok." });
     }
 
-    const { rows } = await req.db.query(
-      `UPDATE ekipman SET durum = 'HURDA' WHERE ekipman_id = $1 RETURNING *`,
+    const { rows: planSayimRows } = await req.db.query(
+      `SELECT COUNT(*) AS sayi FROM bakim_plani WHERE ekipman_id = $1`,
       [req.params.ekipman_id]
     );
-    res.json({ mesaj: "Ekipman pasifleştirildi (HURDA).", ekipman: rows[0] });
+    if (Number(planSayimRows[0].sayi) > 0) {
+      return res.status(409).json({
+        hata_kodu: "EKIPMAN_KULLANIMDA",
+        mesaj: `Bu ekipmana ait ${planSayimRows[0].sayi} bakım planı var, silinemez. Önce o planları silin/kaldırın, ya da yalnızca pasifleştirin.`,
+      });
+    }
+
+    await req.db.query(`DELETE FROM ekipman WHERE ekipman_id = $1`, [req.params.ekipman_id]);
+    res.json({ mesaj: "Ekipman kalıcı olarak silindi." });
   } catch (err) {
     next(err);
   }
