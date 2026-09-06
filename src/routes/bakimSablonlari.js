@@ -54,6 +54,35 @@ router.get("/", async (req, res, next) => {
   }
 });
 
+// GET /api/v1/bakim-sablonlari/diger-holdingler — kopyalama amacıyla BAŞKA
+// holdinglerin (kendi holdingi hariç) aktif şablonlarını listeler. Yeni
+// açılan bir holding, başka bir holdingin kütüphanesinden ödünç şablon
+// alabilsin diye — ama yalnızca GÖRÜNTÜLEME içindir, düzenleme/silme yetkisi
+// vermez; kopyalanan şablon her zaman kendi holdingine yazılır.
+// NOT: Bu route, "/:sablon_id" route'undan ÖNCE tanımlanmalı — aksi halde
+// Express "diger-holdingler" metnini bir sablon_id değeri sanır.
+router.get("/diger-holdingler", requireRole(...SABLON_YONETICI_ROLLERI), async (req, res, next) => {
+  try {
+    const params = [];
+    let kosul = "WHERE bs.aktif_mi = TRUE";
+    if (!platformAdminMi(req)) {
+      params.push(req.user.isletme_id);
+      kosul += ` AND bs.isletme_id <> $${params.length}`;
+    }
+    const { rows } = await req.db.query(
+      `SELECT bs.sablon_id, bs.ad, bs.ekipman_tipi, bs.periyot_tipi, bs.isletme_id, i.ad AS isletme_adi
+       FROM bakim_sablonu bs
+       JOIN isletme i ON i.isletme_id = bs.isletme_id
+       ${kosul}
+       ORDER BY i.ad, bs.ad`,
+      params
+    );
+    res.json({ veri: rows });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // GET /api/v1/bakim-sablonlari/:sablon_id — şablon detayı + checklist yapısı
 router.get("/:sablon_id", async (req, res, next) => {
   try {
@@ -149,8 +178,10 @@ router.patch("/:sablon_id", requireRole(...SABLON_YONETICI_ROLLERI), async (req,
   }
 });
 
-// POST /api/v1/bakim-sablonlari/:sablon_id/kopyala — mevcut şablondan yeni bir tane türetir
-// (kopya, kaynağın ait olduğu holding içinde kalır)
+// POST /api/v1/bakim-sablonlari/:sablon_id/kopyala — mevcut şablondan yeni bir
+// tane türetir. Kaynak HANGİ holdingden olursa olsun kopyalanabilir (başka bir
+// holdingden ödünç almak için) — ama sonuç her zaman kopyalayanın KENDİ
+// holdingine yazılır (Platform Admin isterse hedef_isletme_id belirtebilir).
 router.post("/:sablon_id/kopyala", requireRole(...SABLON_YONETICI_ROLLERI), async (req, res, next) => {
   try {
     const { rows: kaynakRows } = await req.db.query(`SELECT * FROM bakim_sablonu WHERE sablon_id = $1`, [
@@ -160,11 +191,10 @@ router.post("/:sablon_id/kopyala", requireRole(...SABLON_YONETICI_ROLLERI), asyn
     if (!kaynak) {
       return res.status(404).json({ hata_kodu: "SABLON_BULUNAMADI", mesaj: "Kaynak şablon bulunamadı." });
     }
-    if (!platformAdminMi(req) && kaynak.isletme_id !== req.user.isletme_id) {
-      return res.status(403).json({ hata_kodu: "YETKI_YOK", mesaj: "Bu şablona erişim yetkiniz yok." });
-    }
 
-    const yeniAd = req.body.ad || `${kaynak.ad} (kopya)`;
+    const hedefIsletmeId =
+      platformAdminMi(req) && req.body.hedef_isletme_id ? req.body.hedef_isletme_id : req.user.isletme_id;
+    const yeniAd = req.body.ad || kaynak.ad;
 
     const { rows } = await req.db.query(
       `INSERT INTO bakim_sablonu (ad, ekipman_tipi, periyot_tipi, checklist_json, olusturan_kullanici_id, isletme_id)
@@ -176,7 +206,7 @@ router.post("/:sablon_id/kopyala", requireRole(...SABLON_YONETICI_ROLLERI), asyn
         kaynak.periyot_tipi,
         JSON.stringify(kaynak.checklist_json),
         req.user.kullanici_id,
-        kaynak.isletme_id,
+        hedefIsletmeId,
       ]
     );
     res.status(201).json(rows[0]);

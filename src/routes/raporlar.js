@@ -248,7 +248,7 @@ router.get("/filtre-secenekleri", requireRole(...RAPOR_ROLLERI), async (req, res
     }
 
     const { rows: santraller } = await req.db.query(
-      `SELECT s.santral_id, s.ad, i.ad AS isletme_adi
+      `SELECT s.santral_id, s.ad, s.isletme_id, i.ad AS isletme_adi
        FROM santral s JOIN isletme i ON i.isletme_id = s.isletme_id
        WHERE s.santral_id = ANY($1::uuid[])
        ORDER BY i.ad, s.ad`,
@@ -256,7 +256,7 @@ router.get("/filtre-secenekleri", requireRole(...RAPOR_ROLLERI), async (req, res
     );
 
     const { rows: personel } = await req.db.query(
-      `SELECT DISTINCT k.kullanici_id, k.ad_soyad
+      `SELECT DISTINCT k.kullanici_id, k.ad_soyad, k.isletme_id
        FROM kullanici k
        WHERE k.kullanici_id IN (
          SELECT kullanici_id FROM v_kullanici_yetkili_santraller WHERE santral_id = ANY($1::uuid[])
@@ -362,7 +362,7 @@ async function genelRaporVerisiTopla(req) {
 function pdfBakimTablosuCiz(dokuman, gorevler) {
   const sutunlar = [
     { baslik: "Santral", genislik: 90 },
-    { baslik: "Bakım Adı", genislik: 210 },
+    { baslik: "Bakım Adı", genislik: 296 },
     { baslik: "Periyot", genislik: 65 },
     { baslik: "Durum", genislik: 72 },
     { baslik: "Personel", genislik: 85 },
@@ -417,7 +417,40 @@ function pdfBakimTablosuCiz(dokuman, gorevler) {
   return y;
 }
 
-// GET /api/v1/raporlar/pdf — santral_id/periyot/sorumlu_kullanici_id/baslangic/bitis
+// GET /api/v1/raporlar/ozet-banner?baslangic=&bitis= — santral bazlı devam
+// eden/geciken/tamamlanan sayılarını döner (2. banner'daki dairesel
+// göstergeler için). Geciken sayısı her zaman GÜNCEL (dönem filtresinden
+// bağımsız) hesaplanır — geçmişte kalan bir gecikme "bugün" hâlâ gecikmedir.
+router.get("/ozet-banner", requireRole(...RAPOR_ROLLERI), async (req, res, next) => {
+  try {
+    const santralIdleri = await erisilenSantralIdleri(req);
+    if (santralIdleri.length === 0) {
+      return res.json({ veri: [] });
+    }
+    const baslangic = req.query.baslangic || "1900-01-01";
+    const bitis = req.query.bitis || "2999-12-31";
+
+    const { rows } = await req.db.query(
+      `SELECT s.santral_id, s.ad AS santral_adi, i.ad AS isletme_adi,
+         COUNT(*) FILTER (WHERE g.durum IN ('BEKLIYOR','DEVAM_EDIYOR') AND g.planlanan_tarih BETWEEN $2 AND $3) AS devam_eden,
+         COUNT(*) FILTER (WHERE g.durum = 'GECIKTI') AS geciken,
+         COUNT(*) FILTER (WHERE g.durum = 'TAMAMLANDI' AND g.planlanan_tarih BETWEEN $2 AND $3) AS tamamlanan
+       FROM santral s
+       JOIN isletme i ON i.isletme_id = s.isletme_id
+       LEFT JOIN bakim_plani bp ON bp.santral_id = s.santral_id
+       LEFT JOIN bakim_gorevi g ON g.plan_id = bp.plan_id
+       WHERE s.santral_id = ANY($1::uuid[])
+       GROUP BY s.santral_id, s.ad, i.ad
+       ORDER BY i.ad, s.ad`,
+      [santralIdleri, baslangic, bitis]
+    );
+    res.json({ veri: rows });
+  } catch (err) {
+    next(err);
+  }
+});
+
+
 // hepsi isteğe bağlıdır; boş bırakılan filtre uygulanmaz (hepsi seçilmiş sayılır).
 router.get("/pdf", requireRole(...RAPOR_ROLLERI), async (req, res, next) => {
   try {
