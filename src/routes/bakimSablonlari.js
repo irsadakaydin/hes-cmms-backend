@@ -19,7 +19,7 @@ function platformAdminMi(req) {
 // (?ekipman_tipi= ile filtrelenebilir; Platform Admin isteğe bağlı ?isletme_id= ile tek bir holdinge bakabilir)
 router.get("/", async (req, res, next) => {
   try {
-    const { ekipman_tipi, isletme_id, santral_id, hepsi } = req.query;
+    const { ekipman_tipi, isletme_id, santral_id, periyot_tipi, hepsi } = req.query;
     const params = [];
     let sorgu = `SELECT bs.sablon_id, bs.ad, bs.ekipman_tipi, bs.periyot_tipi, bs.versiyon, bs.aktif_mi,
                         bs.olusturma_tarihi, bs.isletme_id, i.ad AS isletme_adi,
@@ -46,6 +46,10 @@ router.get("/", async (req, res, next) => {
     if (ekipman_tipi) {
       params.push(ekipman_tipi);
       sorgu += ` AND bs.ekipman_tipi = $${params.length}`;
+    }
+    if (periyot_tipi) {
+      params.push(periyot_tipi);
+      sorgu += ` AND bs.periyot_tipi = $${params.length}`;
     }
     // santral_id belirtilmişse: o santrale ÖZEL şablonlar + holding genelindeki
     // (santral_id IS NULL) şablonlar — bir bakım planı oluştururken kullanılan
@@ -85,6 +89,30 @@ router.get("/diger-holdingler", requireRole("ADMIN"), async (req, res, next) => 
        ${kosul}
        ORDER BY i.ad, bs.ad`,
       params
+    );
+    res.json({ veri: rows });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/v1/bakim-sablonlari/saha-personeli?isletme_id=X — "Oto Bakım
+// Planla" sayfasında sorumlu seçimi için, belirtilen holdingin saha
+// personelini listeler. Platform Admin herhangi bir holding için
+// sorgulayabilir; diğerleri yalnızca kendi holdingi için.
+// NOT: Bu route, "/:sablon_id" route'undan ÖNCE tanımlanmalı — aksi halde
+// Express "saha-personeli" metnini bir sablon_id değeri sanır.
+router.get("/saha-personeli", requireRole(...SABLON_YONETICI_ROLLERI), async (req, res, next) => {
+  try {
+    const hedefIsletmeId = platformAdminMi(req) ? req.query.isletme_id : req.user.isletme_id;
+    if (!hedefIsletmeId) {
+      return res.status(400).json({ hata_kodu: "EKSIK_ALAN", mesaj: "isletme_id belirtilmelidir." });
+    }
+    const { rows } = await req.db.query(
+      `SELECT kullanici_id, ad_soyad FROM kullanici
+       WHERE isletme_id = $1 AND rol = 'SAHA_PERSONELI' AND aktif_mi = TRUE
+       ORDER BY ad_soyad`,
+      [hedefIsletmeId]
     );
     res.json({ veri: rows });
   } catch (err) {
@@ -354,5 +382,144 @@ router.delete(
     }
   }
 );
+
+/** Periyoda göre bakım planının başlangıç tarihini hesaplar.
+ * HAFTALIK  → içinde bulunulan haftanın Pazartesi günü (geçmişte kalsa
+ *             bile — böylece o hafta için hâlâ oluşturulmamışsa görev
+ *             doğru şekilde GECİKTİ olarak işaretlenir).
+ * AYLIK     → içinde bulunulan ayın 1'i (aynı gerekçeyle).
+ * Diğerleri → çağıran tarafından elle verilen tarih kullanılır. */
+function otomatikBaslangicTarihi(periyotTipi) {
+  const bugun = new Date();
+  if (periyotTipi === "HAFTALIK") {
+    const gun = bugun.getDay(); // 0=Pazar, 1=Pazartesi, ...
+    const pazartesiyeFark = gun === 0 ? -6 : 1 - gun;
+    const pazartesi = new Date(bugun);
+    pazartesi.setDate(bugun.getDate() + pazartesiyeFark);
+    return pazartesi.toISOString().slice(0, 10);
+  }
+  if (periyotTipi === "AYLIK") {
+    return new Date(bugun.getFullYear(), bugun.getMonth(), 1).toISOString().slice(0, 10);
+  }
+  return null;
+}
+
+// POST /api/v1/bakim-sablonlari/:sablon_id/oto-planla — "Oto Bakım Planla"
+// sayfasındaki ana işlem: bu şablonun ekipman tipiyle eşleşen, şablonun ait
+// olduğu holdingin (ya da şablon tek bir santrale özelse yalnızca o
+// santralin) TÜM ekipmanları için otomatik olarak birer bakım planı
+// oluşturur — hâlihazırda bu ekipman+şablon için aktif bir plan varsa o
+// ekipman atlanır (mükerrer plan oluşturulmaz).
+router.post("/:sablon_id/oto-planla", requireRole(...SABLON_YONETICI_ROLLERI), async (req, res, next) => {
+  try {
+    const { rows: sablonRows } = await req.db.query(`SELECT * FROM bakim_sablonu WHERE sablon_id = $1`, [
+      req.params.sablon_id,
+    ]);
+    const sablon = sablonRows[0];
+    if (!sablon) {
+      return res.status(404).json({ hata_kodu: "SABLON_BULUNAMADI", mesaj: "Bakım şablonu bulunamadı." });
+    }
+    if (!platformAdminMi(req) && sablon.isletme_id !== req.user.isletme_id) {
+      return res.status(403).json({ hata_kodu: "YETKI_YOK", mesaj: "Bu şablona erişim yetkiniz yok." });
+    }
+
+    const { sorumlu_kullanici_idleri, baslangic_tarihi, bitis_tarihi } = req.body;
+    if (!Array.isArray(sorumlu_kullanici_idleri) || sorumlu_kullanici_idleri.length === 0) {
+      return res.status(400).json({
+        hata_kodu: "EKSIK_ALAN",
+        mesaj: "En az bir sorumlu (saha personeli) seçilmelidir.",
+      });
+    }
+
+    const otomatikTarih = otomatikBaslangicTarihi(sablon.periyot_tipi);
+    const nihaiBaslangic = otomatikTarih || baslangic_tarihi;
+    if (!nihaiBaslangic) {
+      return res.status(400).json({
+        hata_kodu: "EKSIK_ALAN",
+        mesaj: "Bu periyot için Bakım Başlama Tarihi belirtilmelidir.",
+      });
+    }
+
+    // Hedef santraller: şablon belirli bir santrale özelse yalnızca o
+    // santral; değilse şablonun holdingindeki TÜM santraller.
+    const { rows: santralRows } = await req.db.query(
+      sablon.santral_id
+        ? `SELECT santral_id FROM santral WHERE santral_id = $1`
+        : `SELECT santral_id FROM santral WHERE isletme_id = $1`,
+      [sablon.santral_id || sablon.isletme_id]
+    );
+    const santralIdleri = santralRows.map((r) => r.santral_id);
+
+    // Bu şablonun ekipman tipiyle eşleşen, henüz bu şablon için aktif bir
+    // planı OLMAYAN tüm ekipmanları bul.
+    const { rows: ekipmanRows } = await req.db.query(
+      `SELECT e.ekipman_id, e.santral_id, e.ad AS ekipman_adi, s.ad AS santral_adi
+       FROM ekipman e
+       JOIN santral s ON s.santral_id = e.santral_id
+       WHERE e.santral_id = ANY($1::uuid[]) AND e.tip = $2 AND e.durum = 'AKTIF'
+         AND NOT EXISTS (
+           SELECT 1 FROM bakim_plani bp
+           WHERE bp.ekipman_id = e.ekipman_id AND bp.sablon_id = $3 AND bp.aktif_mi = TRUE
+         )`,
+      [santralIdleri, sablon.ekipman_tipi, req.params.sablon_id]
+    );
+
+    if (ekipmanRows.length === 0) {
+      return res.json({
+        mesaj: "Uygun ekipman bulunamadı — ya bu tipte ekipman yok, ya da hepsi için zaten aktif bir plan var.",
+        olusturulan_sayisi: 0,
+      });
+    }
+
+    const bugunKucukEsitMi = new Date(nihaiBaslangic) <= new Date(new Date().toDateString());
+    const sonuclar = [];
+
+    await req.db.query("BEGIN");
+    try {
+      for (const ekipman of ekipmanRows) {
+        const { rows: planRows } = await req.db.query(
+          `INSERT INTO bakim_plani (santral_id, ekipman_id, sablon_id, periyot, baslangic_tarihi, bitis_tarihi)
+           VALUES ($1, $2, $3, $4, $5, $6)
+           RETURNING plan_id`,
+          [
+            ekipman.santral_id,
+            ekipman.ekipman_id,
+            req.params.sablon_id,
+            sablon.periyot_tipi,
+            nihaiBaslangic,
+            otomatikTarih ? null : bitis_tarihi || null,
+          ]
+        );
+        const planId = planRows[0].plan_id;
+
+        for (const kullaniciId of sorumlu_kullanici_idleri) {
+          await req.db.query(`INSERT INTO bakim_plani_sorumlu (plan_id, kullanici_id) VALUES ($1, $2)`, [
+            planId,
+            kullaniciId,
+          ]);
+          await req.db.query(
+            `INSERT INTO bakim_gorevi (plan_id, atanan_kullanici_id, planlanan_tarih, durum)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (plan_id, planlanan_tarih, atanan_kullanici_id) DO NOTHING`,
+            [planId, kullaniciId, nihaiBaslangic, bugunKucukEsitMi ? "GECIKTI" : "BEKLIYOR"]
+          );
+        }
+        sonuclar.push({ ekipman_adi: ekipman.ekipman_adi, santral_adi: ekipman.santral_adi });
+      }
+      await req.db.query("COMMIT");
+    } catch (icErr) {
+      await req.db.query("ROLLBACK");
+      throw icErr;
+    }
+
+    res.status(201).json({
+      mesaj: `${sonuclar.length} ekipman için bakım planı oluşturuldu (başlangıç: ${nihaiBaslangic}${bugunKucukEsitMi ? " — geciken olarak işaretlendi" : ""}).`,
+      olusturulan_sayisi: sonuclar.length,
+      detaylar: sonuclar,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
 
 module.exports = router;
