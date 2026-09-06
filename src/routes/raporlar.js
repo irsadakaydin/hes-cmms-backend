@@ -221,6 +221,10 @@ const PERIYOT_ETIKETLERI = {
   UC_AYLIK: "3 Ayda Bir",
   ALTI_AYLIK: "6 Ayda Bir",
   YILLIK: "Yıllık",
+  IKI_YILLIK: "2 Yılda Bir",
+  UC_YILLIK: "3 Yılda Bir",
+  BES_YILLIK: "5 Yılda Bir",
+  ON_YILLIK: "10 Yılda Bir",
 };
 
 function tarihFormatla(deger) {
