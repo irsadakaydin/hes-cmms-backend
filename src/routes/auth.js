@@ -19,8 +19,11 @@ router.post("/login", async (req, res, next) => {
     }
 
     const { rows } = await pool.query(
-      `SELECT kullanici_id, isletme_id, ad_soyad, eposta, sifre_hash, rol, aktif_mi
-       FROM kullanici WHERE eposta = $1`,
+      `SELECT k.kullanici_id, k.isletme_id, k.ad_soyad, k.eposta, k.sifre_hash, k.rol, k.aktif_mi,
+              i.durum AS isletme_durum
+       FROM kullanici k
+       LEFT JOIN isletme i ON i.isletme_id = k.isletme_id
+       WHERE k.eposta = $1`,
       [eposta]
     );
 
@@ -29,6 +32,15 @@ router.post("/login", async (req, res, next) => {
       return res.status(401).json({
         hata_kodu: "GIRIS_BASARISIZ",
         mesaj: "E-posta veya şifre hatalı, ya da hesap pasif.",
+      });
+    }
+
+    // Platform Admin (rol=ADMIN) her zaman giriş yapabilir — bir holdinge
+    // bağlı olsa bile o holdingin durumu Platform Admin'i etkilemez.
+    if (kullanici.rol !== "ADMIN" && kullanici.isletme_durum === "PASIF") {
+      return res.status(401).json({
+        hata_kodu: "GIRIS_BASARISIZ",
+        mesaj: "Bağlı olduğunuz holding pasifleştirilmiş, giriş yapamazsınız.",
       });
     }
 
