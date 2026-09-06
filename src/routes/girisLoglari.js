@@ -38,27 +38,32 @@ async function girisKayitlariniTopla(req) {
   const params = [];
   const kosullar = [];
 
-  if (platformAdminMi(req)) {
-    if (req.query.santral_idleri) {
-      const santralIdleri = Array.isArray(req.query.santral_idleri)
-        ? req.query.santral_idleri
-        : [req.query.santral_idleri];
-      params.push(santralIdleri);
-      kosullar.push(
-        `k.kullanici_id IN (SELECT kullanici_id FROM v_kullanici_yetkili_santraller WHERE santral_id = ANY($${params.length}::uuid[]))`
-      );
-    } else if (req.query.isletme_id) {
-      params.push(req.query.isletme_id);
+  if (req.query.santral_idleri) {
+    const santralIdleri = Array.isArray(req.query.santral_idleri)
+      ? req.query.santral_idleri
+      : [req.query.santral_idleri];
+    params.push(santralIdleri);
+    kosullar.push(
+      `k.kullanici_id IN (SELECT kullanici_id FROM v_kullanici_yetkili_santraller WHERE santral_id = ANY($${params.length}::uuid[]))`
+    );
+    if (!platformAdminMi(req)) {
+      params.push(req.user.isletme_id);
       kosullar.push(`k.isletme_id = $${params.length}`);
     }
-  } else {
+  } else if (platformAdminMi(req) && req.query.isletme_id) {
+    params.push(req.query.isletme_id);
+    kosullar.push(`k.isletme_id = $${params.length}`);
+  } else if (!platformAdminMi(req)) {
     params.push(req.user.isletme_id);
     kosullar.push(`k.isletme_id = $${params.length}`);
   }
 
-  if (req.query.kullanici_id) {
-    params.push(req.query.kullanici_id);
-    kosullar.push(`g.kullanici_id = $${params.length}`);
+  if (req.query.kullanici_idleri) {
+    const kullaniciIdleri = Array.isArray(req.query.kullanici_idleri)
+      ? req.query.kullanici_idleri
+      : [req.query.kullanici_idleri];
+    params.push(kullaniciIdleri);
+    kosullar.push(`g.kullanici_id = ANY($${params.length}::uuid[])`);
   }
   if (req.query.baslangic) {
     params.push(req.query.baslangic);
@@ -94,17 +99,21 @@ router.get("/filtre-secenekleri", requireRole(...LOG_ROLLERI), async (req, res, 
   try {
     const params = [];
     let kosul = "";
-    if (!platformAdminMi(req)) {
-      params.push(req.user.isletme_id);
-      kosul = `WHERE isletme_id = $1`;
-    } else if (req.query.santral_idleri) {
+    if (req.query.santral_idleri) {
       const santralIdleri = Array.isArray(req.query.santral_idleri)
         ? req.query.santral_idleri
         : [req.query.santral_idleri];
       params.push(santralIdleri);
       kosul = `WHERE kullanici_id IN (SELECT kullanici_id FROM v_kullanici_yetkili_santraller WHERE santral_id = ANY($1::uuid[]))`;
-    } else if (req.query.isletme_id) {
+      if (!platformAdminMi(req)) {
+        params.push(req.user.isletme_id);
+        kosul += ` AND isletme_id = $2`;
+      }
+    } else if (platformAdminMi(req) && req.query.isletme_id) {
       params.push(req.query.isletme_id);
+      kosul = `WHERE isletme_id = $1`;
+    } else if (!platformAdminMi(req)) {
+      params.push(req.user.isletme_id);
       kosul = `WHERE isletme_id = $1`;
     }
     const { rows: kisiler } = await req.db.query(
@@ -119,6 +128,13 @@ router.get("/filtre-secenekleri", requireRole(...LOG_ROLLERI), async (req, res, 
       holdingler = hRows;
       const { rows: sRows } = await req.db.query(
         `SELECT santral_id, ad, isletme_id FROM santral ORDER BY ad`
+      );
+      santraller = sRows;
+    } else {
+      // İşletme Admin de kendi holdinginin santral panelini görebilsin diye
+      const { rows: sRows } = await req.db.query(
+        `SELECT santral_id, ad, isletme_id FROM santral WHERE isletme_id = $1 ORDER BY ad`,
+        [req.user.isletme_id]
       );
       santraller = sRows;
     }
