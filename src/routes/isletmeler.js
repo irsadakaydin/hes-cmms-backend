@@ -67,9 +67,18 @@ router.post("/", requireRole("ADMIN"), async (req, res, next) => {
     );
     const isletme = isletmeRows[0];
 
-    // Geçici şifre — kullanıcı ilk girişte değiştirmeli (davet e-postası akışı ileride eklenir)
+    // Bir başlangıç şifresi belirtilmişse onu kullan; belirtilmemişse rastgele
+    // üretip yanıt gövdesinde BİR KEZ döndürüyoruz (sonra tekrar görüntülenemez).
     const bcrypt = require("bcryptjs");
-    const gecidiSifreHash = await bcrypt.hash(Math.random().toString(36).slice(2) + Date.now(), 10);
+    let atananSifre = ilk_admin.sifre;
+    if (atananSifre && atananSifre.length < 6) {
+      await req.db.query("ROLLBACK");
+      return res.status(400).json({ hata_kodu: "GECERSIZ_SIFRE", mesaj: "Şifre en az 6 karakter olmalıdır." });
+    }
+    if (!atananSifre) {
+      atananSifre = Math.random().toString(36).slice(2) + Date.now().toString(36);
+    }
+    const gecidiSifreHash = await bcrypt.hash(atananSifre, 10);
 
     const { rows: kullaniciRows } = await req.db.query(
       `INSERT INTO kullanici (isletme_id, ad_soyad, eposta, sifre_hash, rol)
@@ -83,7 +92,7 @@ router.post("/", requireRole("ADMIN"), async (req, res, next) => {
     res.status(201).json({
       isletme,
       ilk_admin: kullaniciRows[0],
-      not: "İlk admin için şifre sıfırlama e-postası gönderilmeli (bu taslakta e-posta entegrasyonu yok).",
+      uretilen_sifre: ilk_admin.sifre ? undefined : atananSifre,
     });
   } catch (err) {
     await req.db.query("ROLLBACK");
@@ -136,6 +145,53 @@ router.post("/:isletme_id/pasiflestir", requireRole("ADMIN"), async (req, res, n
       return res.status(404).json({ hata_kodu: "ISLETME_BULUNAMADI", mesaj: "İşletme bulunamadı." });
     }
     res.json({ mesaj: "İşletme pasifleştirildi, tüm kullanıcı girişleri engellendi.", isletme: rows[0] });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/v1/isletmeler/:isletme_id/aktiflestir
+router.post("/:isletme_id/aktiflestir", requireRole("ADMIN"), async (req, res, next) => {
+  try {
+    const { rows } = await req.db.query(
+      `UPDATE isletme SET durum = 'AKTIF' WHERE isletme_id = $1 RETURNING *`,
+      [req.params.isletme_id]
+    );
+    if (!rows[0]) {
+      return res.status(404).json({ hata_kodu: "ISLETME_BULUNAMADI", mesaj: "İşletme bulunamadı." });
+    }
+    res.json({ mesaj: "İşletme yeniden aktifleştirildi.", isletme: rows[0] });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// DELETE /api/v1/isletmeler/:isletme_id — yalnızca içinde HİÇBİR santral ya
+// da kullanıcı yoksa gerçekten silinir; aksi halde veri kaybını önlemek için
+// reddedilir ve önce pasifleştirilmesi/boşaltılması önerilir.
+router.delete("/:isletme_id", requireRole("ADMIN"), async (req, res, next) => {
+  try {
+    const { rows: sayimRows } = await req.db.query(
+      `SELECT
+         (SELECT COUNT(*) FROM santral WHERE isletme_id = $1) AS santral_sayisi,
+         (SELECT COUNT(*) FROM kullanici WHERE isletme_id = $1) AS kullanici_sayisi`,
+      [req.params.isletme_id]
+    );
+    const { santral_sayisi, kullanici_sayisi } = sayimRows[0];
+    if (Number(santral_sayisi) > 0 || Number(kullanici_sayisi) > 0) {
+      return res.status(409).json({
+        hata_kodu: "ISLETME_BOS_DEGIL",
+        mesaj: `Bu işletmenin içinde ${santral_sayisi} santral ve ${kullanici_sayisi} kullanıcı var. Silmeden önce bunları başka bir holdinge taşıyın/silin, ya da yalnızca pasifleştirin.`,
+      });
+    }
+
+    const { rows } = await req.db.query(`DELETE FROM isletme WHERE isletme_id = $1 RETURNING isletme_id`, [
+      req.params.isletme_id,
+    ]);
+    if (!rows[0]) {
+      return res.status(404).json({ hata_kodu: "ISLETME_BULUNAMADI", mesaj: "İşletme bulunamadı." });
+    }
+    res.json({ mesaj: "İşletme silindi." });
   } catch (err) {
     next(err);
   }
