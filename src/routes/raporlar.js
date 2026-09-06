@@ -296,6 +296,13 @@ async function genelRaporVerisiTopla(req) {
     }
     params.push(req.query.santral_id);
     ekKosul += ` AND s.santral_id = $${params.length}`;
+  } else if (req.query.isletme_id) {
+    // Belirli bir santral seçilmemiş ama bir HOLDING seçilmişse ("Tüm
+    // Santraller" + o holding) — raporu yalnızca o holdingin santralleriyle
+    // sınırla. Bu olmadan Platform Admin için rapor, seçilen holdingin
+    // dışındaki (erişimi olan tüm) santralleri de karıştırıyordu.
+    params.push(req.query.isletme_id);
+    ekKosul += ` AND s.isletme_id = $${params.length}`;
   }
   if (req.query.sorumlu_kullanici_id) {
     params.push(req.query.sorumlu_kullanici_id);

@@ -33,6 +33,20 @@ router.get("/alicilar", requireRole(...MESAJ_YONETICI_ROLLERI), async (req, res,
 });
 
 // GET /api/v1/mesajlar/gelen-kutusu — oturum açan kullanıcının aldığı mesajlar
+// GET /api/v1/mesajlar/okunmamis-sayisi — üst menüdeki "Mesajlar" linkinin
+// yanında bildirim işareti göstermek için kullanılır.
+router.get("/okunmamis-sayisi", async (req, res, next) => {
+  try {
+    const { rows } = await req.db.query(
+      `SELECT COUNT(*) AS sayi FROM mesaj WHERE alici_kullanici_id = $1 AND okundu_mu = FALSE`,
+      [req.user.kullanici_id]
+    );
+    res.json({ sayi: Number(rows[0].sayi) });
+  } catch (err) {
+    next(err);
+  }
+});
+
 router.get("/gelen-kutusu", async (req, res, next) => {
   try {
     const { rows } = await req.db.query(
