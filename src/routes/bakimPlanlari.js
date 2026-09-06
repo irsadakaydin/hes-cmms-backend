@@ -109,7 +109,8 @@ router.post(
       const { rows: sablonRows } = await req.db.query(
         `SELECT bs.sablon_id FROM bakim_sablonu bs
          JOIN santral s ON s.isletme_id = bs.isletme_id
-         WHERE bs.sablon_id = $1 AND s.santral_id = $2`,
+         WHERE bs.sablon_id = $1 AND s.santral_id = $2
+           AND (bs.santral_id IS NULL OR bs.santral_id = $2)`,
         [sablon_id, santral_id]
       );
       if (!sablonRows[0]) {

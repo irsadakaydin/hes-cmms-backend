@@ -66,6 +66,11 @@ router.post("/login", async (req, res, next) => {
       `UPDATE kullanici SET son_giris_tarihi = now() WHERE kullanici_id = $1`,
       [kullanici.kullanici_id]
     );
+    // Giriş logu — "Log Giriş" sayfasında kişi/tarih bazlı görüntülenir.
+    await pool.query(
+      `INSERT INTO giris_kaydi (kullanici_id, ip_adresi) VALUES ($1, $2)`,
+      [kullanici.kullanici_id, req.ip || null]
+    );
 
     res.json({
       access_token: token,

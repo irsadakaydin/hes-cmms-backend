@@ -87,6 +87,19 @@ router.post("/", async (req, res, next) => {
 
     const yoneticiMi = MESAJ_YONETICI_ROLLERI.includes(req.user.rol);
 
+    // Bu mesaj, TEK bir alıcıya ve o alıcının DAHA ÖNCE bize yazdığı bir
+    // yanıt mı? Öyleyse holding sınırlaması uygulanmaz — GM gibi başka bir
+    // holdingden yazan biri varsa, o kişinin yanıt verebilmesi gerekir
+    // (aksi halde "kapsam dışı" hatası yanıtı da engellerdi).
+    let cevapMi = false;
+    if (alici_kullanici_idleri.length === 1) {
+      const { rows: dahaOnceRows } = await req.db.query(
+        `SELECT 1 FROM mesaj WHERE gonderen_kullanici_id = $1 AND alici_kullanici_id = $2 LIMIT 1`,
+        [alici_kullanici_idleri[0], req.user.kullanici_id]
+      );
+      cevapMi = !!dahaOnceRows[0];
+    }
+
     if (!yoneticiMi) {
       if (alici_kullanici_idleri.length !== 1) {
         return res.status(403).json({
@@ -94,11 +107,7 @@ router.post("/", async (req, res, next) => {
           mesaj: "Yalnızca size daha önce mesaj göndermiş bir kişiye, yanıt olarak tek tek mesaj yazabilirsiniz.",
         });
       }
-      const { rows: dahaOnceRows } = await req.db.query(
-        `SELECT 1 FROM mesaj WHERE gonderen_kullanici_id = $1 AND alici_kullanici_id = $2 LIMIT 1`,
-        [alici_kullanici_idleri[0], req.user.kullanici_id]
-      );
-      if (!dahaOnceRows[0]) {
+      if (!cevapMi) {
         return res.status(403).json({
           hata_kodu: "YETKI_YOK",
           mesaj: "Yeni bir konuşma başlatamazsınız — yalnızca size mesaj göndermiş birine yanıt verebilirsiniz.",
@@ -107,10 +116,11 @@ router.post("/", async (req, res, next) => {
     }
 
     // Alıcıların gerçekten mesaj gönderenin izinli kapsamında olduğunu doğrula
-    // (Platform Admin hariç: yalnızca kendi holdingindeki kullanıcılara gönderilebilir)
+    // (Platform Admin ve gerçek YANITLAR hariç: yalnızca kendi holdingindeki
+    // kullanıcılara YENİ mesaj gönderilebilir)
     const params = [alici_kullanici_idleri];
     let kapsamKosulu = "";
-    if (!platformAdminMi(req)) {
+    if (!platformAdminMi(req) && !cevapMi) {
       params.push(req.user.isletme_id);
       kapsamKosulu = ` AND isletme_id = $${params.length}`;
     }
