@@ -961,6 +961,28 @@ async function gorseleGetir(kaynak) {
   }
 }
 
+/** HTTP header değerleri yalnızca ISO-8859-1/ASCII karakter kabul eder;
+ * Türkçe ı/ş/ğ/İ gibi karakterler Content-Disposition'da "Invalid character
+ * in header content" hatasına yol açar. ASCII'ye sadeleştirilmiş bir yedek
+ * ad üretir; gerçek Türkçe ad ise RFC 6266 filename* parametresiyle
+ * (UTF-8 kodlanmış) ayrıca eklenir, böylece modern tarayıcılarda doğru
+ * görünür, eskilerinde de en azından çökmeden iner. */
+function dosyaAdiGuvenliHaleGetir(metin) {
+  const harita = {
+    ı: "i", İ: "I", ş: "s", Ş: "S", ğ: "g", Ğ: "G",
+    ü: "u", Ü: "U", ö: "o", Ö: "O", ç: "c", Ç: "C",
+  };
+  return metin
+    .replace(/[ışŞğĞüÜöÖçÇİ]/g, (ch) => harita[ch] || ch)
+    .replace(/[^\x20-\x7E]/g, "")
+    .replace(/\s+/g, "-");
+}
+function contentDispositionOlustur(orijinalAd) {
+  const guvenliAd = dosyaAdiGuvenliHaleGetir(orijinalAd);
+  const utf8Ad = encodeURIComponent(orijinalAd);
+  return `attachment; filename="${guvenliAd}"; filename*=UTF-8''${utf8Ad}`;
+}
+
 // GET /api/v1/raporlar/gorev-detay-pdf/:gorev_id
 router.get("/gorev-detay-pdf/:gorev_id", requireRole(...RAPOR_ROLLERI), async (req, res, next) => {
   try {
@@ -993,7 +1015,7 @@ router.get("/gorev-detay-pdf/:gorev_id", requireRole(...RAPOR_ROLLERI), async (r
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader(
       "Content-Disposition",
-      `attachment; filename="bakim-formu-${kayit.ekipman_adi.replace(/\s+/g, "-")}.pdf"`
+      contentDispositionOlustur(`bakim-formu-${kayit.ekipman_adi}.pdf`)
     );
 
     const dokuman = new PDFDocument({ size: "A4", margin: 45 });
