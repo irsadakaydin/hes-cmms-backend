@@ -27,11 +27,16 @@ router.get("/santraller/:santral_id/bakim-planlari", async (req, res, next) => {
          bp.plan_id, bp.periyot, bp.baslangic_tarihi, bp.bitis_tarihi, bp.aktif_mi,
          e.ekipman_id, e.ad AS ekipman_adi,
          bs.sablon_id, bs.ad AS sablon_adi,
-         k.kullanici_id AS sorumlu_kullanici_id, k.ad_soyad AS sorumlu_ad_soyad
+         COALESCE(
+           (SELECT json_agg(json_build_object('kullanici_id', k.kullanici_id, 'ad_soyad', k.ad_soyad) ORDER BY k.ad_soyad)
+            FROM bakim_plani_sorumlu bps
+            JOIN kullanici k ON k.kullanici_id = bps.kullanici_id
+            WHERE bps.plan_id = bp.plan_id),
+           '[]'
+         ) AS sorumlular
        FROM bakim_plani bp
        JOIN ekipman e        ON e.ekipman_id = bp.ekipman_id
        JOIN bakim_sablonu bs ON bs.sablon_id = bp.sablon_id
-       LEFT JOIN kullanici k ON k.kullanici_id = bp.sorumlu_kullanici_id
        WHERE bp.santral_id = $1
        ORDER BY bp.aktif_mi DESC, bp.baslangic_tarihi DESC`,
       [req.params.santral_id]
@@ -72,17 +77,24 @@ router.post(
         return res.status(403).json({ hata_kodu: "YETKI_YOK", mesaj: "Bu santrale erişim yetkiniz yok." });
       }
 
-      const { ekipman_id, sablon_id, periyot, baslangic_tarihi, bitis_tarihi, sorumlu_kullanici_id } =
+      const { ekipman_id, sablon_id, periyot, baslangic_tarihi, bitis_tarihi, sorumlu_kullanici_idleri } =
         req.body;
 
-      if (!ekipman_id || !sablon_id || !periyot || !baslangic_tarihi) {
+      if (
+        !ekipman_id ||
+        !sablon_id ||
+        !periyot ||
+        !baslangic_tarihi ||
+        !Array.isArray(sorumlu_kullanici_idleri) ||
+        sorumlu_kullanici_idleri.length === 0
+      ) {
         return res.status(400).json({
           hata_kodu: "EKSIK_ALAN",
-          mesaj: "ekipman_id, sablon_id, periyot ve baslangic_tarihi alanları zorunludur.",
+          mesaj:
+            "ekipman_id, sablon_id, periyot, baslangic_tarihi ve en az bir kişilik sorumlu_kullanici_idleri dizisi zorunludur.",
         });
       }
 
-      // Ekipman gerçekten bu santrale mi bağlı — çapraz santral hatasını önler
       const { rows: ekipmanRows } = await req.db.query(
         `SELECT ekipman_id FROM ekipman WHERE ekipman_id = $1 AND santral_id = $2`,
         [ekipman_id, santral_id]
@@ -94,7 +106,6 @@ router.post(
         });
       }
 
-      // Şablon, santralin bağlı olduğu holding (işletme) dışından seçilmiş olmasın
       const { rows: sablonRows } = await req.db.query(
         `SELECT bs.sablon_id FROM bakim_sablonu bs
          JOIN santral s ON s.isletme_id = bs.isletme_id
@@ -108,40 +119,38 @@ router.post(
         });
       }
 
+      await req.db.query("BEGIN");
+
       const { rows } = await req.db.query(
         `INSERT INTO bakim_plani
-           (santral_id, ekipman_id, sablon_id, periyot, baslangic_tarihi, bitis_tarihi, sorumlu_kullanici_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
+           (santral_id, ekipman_id, sablon_id, periyot, baslangic_tarihi, bitis_tarihi)
+         VALUES ($1, $2, $3, $4, $5, $6)
          RETURNING *`,
-        [
-          santral_id,
-          ekipman_id,
-          sablon_id,
-          periyot,
-          baslangic_tarihi,
-          bitis_tarihi || null,
-          sorumlu_kullanici_id || null,
-        ]
+        [santral_id, ekipman_id, sablon_id, periyot, baslangic_tarihi, bitis_tarihi || null]
       );
       const yeniPlan = rows[0];
 
-      // İlk görevi ANINDA üretiyoruz — aksi halde ertesi gün otomatik
-      // zamanlayıcı çalışana kadar (GitHub Actions, günde bir kez) atanan
-      // kullanıcının "Görevlerim" listesinde hiçbir şey görünmezdi.
-      if (sorumlu_kullanici_id) {
-        const bugunKucukEsitMi = new Date(baslangic_tarihi) <= new Date(new Date().toDateString());
+      for (const kullaniciId of sorumlu_kullanici_idleri) {
         await req.db.query(
-          `INSERT INTO bakim_gorevi (plan_id, atanan_kullanici_id, planlanan_tarih, durum)
-           VALUES ($1, $2, $3, $4)
-           ON CONFLICT (plan_id, planlanan_tarih) DO NOTHING`,
-          [yeniPlan.plan_id, sorumlu_kullanici_id, baslangic_tarihi, bugunKucukEsitMi ? "GECIKTI" : "BEKLIYOR"]
+          `INSERT INTO bakim_plani_sorumlu (plan_id, kullanici_id) VALUES ($1, $2)`,
+          [yeniPlan.plan_id, kullaniciId]
         );
       }
 
+      const bugunKucukEsitMi = new Date(baslangic_tarihi) <= new Date(new Date().toDateString());
+      for (const kullaniciId of sorumlu_kullanici_idleri) {
+        await req.db.query(
+          `INSERT INTO bakim_gorevi (plan_id, atanan_kullanici_id, planlanan_tarih, durum)
+           VALUES ($1, $2, $3, $4)
+           ON CONFLICT (plan_id, planlanan_tarih, atanan_kullanici_id) DO NOTHING`,
+          [yeniPlan.plan_id, kullaniciId, baslangic_tarihi, bugunKucukEsitMi ? "GECIKTI" : "BEKLIYOR"]
+        );
+      }
+
+      await req.db.query("COMMIT");
       res.status(201).json(yeniPlan);
     } catch (err) {
-      // periyot enum'a uymuyorsa PostgreSQL 22P02/23514 türü hata döner —
-      // burada kullanıcıya anlamlı bir mesaj göstermek için yakalıyoruz.
+      await req.db.query("ROLLBACK");
       if (err.code === "22P02") {
         return res.status(400).json({
           hata_kodu: "GECERSIZ_PERIYOT",
@@ -167,32 +176,70 @@ router.patch("/bakim-planlari/:plan_id", requireRole(...YONETICI_ROLLERI), async
       return res.status(403).json({ hata_kodu: "YETKI_YOK", mesaj: "Bu plana erişim yetkiniz yok." });
     }
 
-    const izinliAlanlar = ["periyot", "baslangic_tarihi", "bitis_tarihi", "sorumlu_kullanici_id", "aktif_mi"];
+    const izinliAlanlar = ["periyot", "baslangic_tarihi", "bitis_tarihi", "aktif_mi"];
     const guncellenecekler = Object.keys(req.body).filter((k) => izinliAlanlar.includes(k));
-    if (guncellenecekler.length === 0) {
-      return res.status(400).json({ hata_kodu: "EKSIK_ALAN", mesaj: "Güncellenecek en az bir alan gönderilmeli." });
-    }
 
-    const setIfadesi = guncellenecekler.map((alan, i) => `${alan} = $${i + 1}`).join(", ");
-    const degerler = guncellenecekler.map((alan) => req.body[alan]);
-
-    const { rows } = await req.db.query(
-      `UPDATE bakim_plani SET ${setIfadesi} WHERE plan_id = $${guncellenecekler.length + 1} RETURNING *`,
-      [...degerler, req.params.plan_id]
-    );
-
-    // Sorumlu değiştiyse, henüz tamamlanmamış (BEKLIYOR/GECIKTI) görevleri de
-    // ANINDA yeni sorumluya devret — aksi halde eski sorumlunun üzerinde
-    // kalmaya devam ederdi, yeni sorumlunun listesinde hiç görünmezdi.
-    if (req.body.sorumlu_kullanici_id) {
-      await req.db.query(
-        `UPDATE bakim_gorevi SET atanan_kullanici_id = $1
-         WHERE plan_id = $2 AND durum IN ('BEKLIYOR', 'GECIKTI')`,
-        [req.body.sorumlu_kullanici_id, req.params.plan_id]
+    let plan;
+    if (guncellenecekler.length > 0) {
+      const setIfadesi = guncellenecekler.map((alan, i) => `${alan} = $${i + 1}`).join(", ");
+      const degerler = guncellenecekler.map((alan) => req.body[alan]);
+      const { rows } = await req.db.query(
+        `UPDATE bakim_plani SET ${setIfadesi} WHERE plan_id = $${guncellenecekler.length + 1} RETURNING *`,
+        [...degerler, req.params.plan_id]
       );
+      plan = rows[0];
+    } else {
+      const { rows } = await req.db.query(`SELECT * FROM bakim_plani WHERE plan_id = $1`, [req.params.plan_id]);
+      plan = rows[0];
     }
 
-    res.json(rows[0]);
+    if (Array.isArray(req.body.sorumlu_kullanici_idleri)) {
+      const yeniSet = req.body.sorumlu_kullanici_idleri;
+
+      const { rows: eskiSorumlular } = await req.db.query(
+        `SELECT kullanici_id FROM bakim_plani_sorumlu WHERE plan_id = $1`,
+        [req.params.plan_id]
+      );
+      const eskiSet = eskiSorumlular.map((r) => r.kullanici_id);
+      const cikarilanlar = eskiSet.filter((id) => !yeniSet.includes(id));
+      const eklenenler = yeniSet.filter((id) => !eskiSet.includes(id));
+
+      const { rows: bekleyenRows } = await req.db.query(
+        `SELECT DISTINCT planlanan_tarih FROM bakim_gorevi
+         WHERE plan_id = $1 AND durum IN ('BEKLIYOR', 'GECIKTI')
+         ORDER BY planlanan_tarih DESC LIMIT 1`,
+        [req.params.plan_id]
+      );
+      const bekleyenTarih = bekleyenRows[0]?.planlanan_tarih;
+
+      await req.db.query(`DELETE FROM bakim_plani_sorumlu WHERE plan_id = $1`, [req.params.plan_id]);
+      for (const kullaniciId of yeniSet) {
+        await req.db.query(`INSERT INTO bakim_plani_sorumlu (plan_id, kullanici_id) VALUES ($1, $2)`, [
+          req.params.plan_id,
+          kullaniciId,
+        ]);
+      }
+
+      if (cikarilanlar.length > 0) {
+        await req.db.query(
+          `DELETE FROM bakim_gorevi
+           WHERE plan_id = $1 AND atanan_kullanici_id = ANY($2::uuid[]) AND durum IN ('BEKLIYOR', 'GECIKTI')`,
+          [req.params.plan_id, cikarilanlar]
+        );
+      }
+      if (eklenenler.length > 0 && bekleyenTarih) {
+        for (const kullaniciId of eklenenler) {
+          await req.db.query(
+            `INSERT INTO bakim_gorevi (plan_id, atanan_kullanici_id, planlanan_tarih, durum)
+             VALUES ($1, $2, $3, 'BEKLIYOR')
+             ON CONFLICT (plan_id, planlanan_tarih, atanan_kullanici_id) DO NOTHING`,
+            [req.params.plan_id, kullaniciId, bekleyenTarih]
+          );
+        }
+      }
+    }
+
+    res.json(plan);
   } catch (err) {
     next(err);
   }
@@ -254,9 +301,7 @@ router.post(
   }
 );
 
-// DELETE /api/v1/bakim-planlari/:plan_id — yalnızca hiç görev üretilmemişse
-// gerçekten silinir; görev geçmişi varsa (tamamlanmış kayıtlar dahil) veri
-// kaybını önlemek için reddedilir, "durdur" kullanılması önerilir.
+// DELETE /api/v1/bakim-planlari/:plan_id
 router.delete(
   "/bakim-planlari/:plan_id",
   requireRole(...YONETICI_ROLLERI),
