@@ -12,6 +12,7 @@ const bakimSablonRoutes = require("./routes/bakimSablonlari");
 const kullaniciRoutes = require("./routes/kullanicilar");
 const bildirimRoutes = require("./routes/bildirimler");
 const raporRoutes = require("./routes/raporlar");
+const mesajRoutes = require("./routes/mesajlar");
 
 const app = express();
 // NOT: Şu an tüm kaynaklardan (origin) isteğe izin veriliyor — MVP/geliştirme
@@ -30,6 +31,7 @@ app.use("/api/v1/gorevler", gorevRoutes);
 app.use("/api/v1/isletmeler", isletmeRoutes);
 app.use("/api/v1/bakim-sablonlari", bakimSablonRoutes);
 app.use("/api/v1/raporlar", raporRoutes);
+app.use("/api/v1/mesajlar", mesajRoutes);
 // Bunlar /santraller/:id/... ve /kullanicilar/:id, /isletmeler/:id/kullanicilar,
 // /gorevler/:id/bildirimler gibi birden fazla kök yolu aynı router içinde
 // tanımladığı için /api/v1 köküne bağlanır.
