@@ -342,6 +342,10 @@ router.post(
 );
 
 // DELETE /api/v1/bakim-planlari/:plan_id
+// ?zorla=1 gönderilirse (yalnızca GM/İşletme Admin) plan, tüm görev ve bakım
+// kayıt geçmişiyle BİRLİKTE kalıcı olarak silinir — deneme/test verilerini
+// tamamen temizlemek için. Bu parametre olmadan davranış eskisi gibi
+// güvenlidir (geçmişi olan bir plan silinemez, "durdur" önerilir).
 router.delete(
   "/bakim-planlari/:plan_id",
   requireRole(...YONETICI_ROLLERI),
@@ -362,16 +366,43 @@ router.delete(
         `SELECT COUNT(*) AS sayi FROM bakim_gorevi WHERE plan_id = $1`,
         [req.params.plan_id]
       );
-      if (Number(gorevSayimRows[0].sayi) > 0) {
-        return res.status(409).json({
-          hata_kodu: "PLAN_GECMISI_VAR",
-          mesaj: `Bu plana ait ${gorevSayimRows[0].sayi} görev kaydı var. Geçmişi korumak için silinemez — bunun yerine "durdur" kullanın.`,
+      const gorevSayisi = Number(gorevSayimRows[0].sayi);
+
+      if (gorevSayisi > 0) {
+        const zorlaIsteniyor = req.query.zorla === "1" || req.query.zorla === "true";
+        if (!zorlaIsteniyor) {
+          return res.status(409).json({
+            hata_kodu: "PLAN_GECMISI_VAR",
+            mesaj: `Bu plana ait ${gorevSayisi} görev kaydı var. Geçmişi korumak için silinemez — bunun yerine "durdur" kullanın.`,
+          });
+        }
+        if (!["ISLETME_ADMIN", "ADMIN"].includes(req.user.rol)) {
+          return res.status(403).json({
+            hata_kodu: "YETKI_YOK",
+            mesaj: "Geçmişi olan bir planı zorla silmek yalnızca GM ve İşletme Admin'e açıktır.",
+          });
+        }
+
+        // Zorla silme: görev geçmişini de birlikte kaldır (yalnızca deneme/
+        // test verisi temizliği için kullanılmalı — geri alınamaz).
+        await req.db.query("BEGIN");
+        await req.db.query(
+          `DELETE FROM bakim_kaydi WHERE gorev_id IN (SELECT gorev_id FROM bakim_gorevi WHERE plan_id = $1)`,
+          [req.params.plan_id]
+        );
+        await req.db.query(`DELETE FROM bakim_gorevi WHERE plan_id = $1`, [req.params.plan_id]);
+        await req.db.query(`DELETE FROM bakim_plani_sorumlu WHERE plan_id = $1`, [req.params.plan_id]);
+        await req.db.query(`DELETE FROM bakim_plani WHERE plan_id = $1`, [req.params.plan_id]);
+        await req.db.query("COMMIT");
+        return res.json({
+          mesaj: `Bakım planı, ${gorevSayisi} görev kaydıyla birlikte kalıcı olarak silindi.`,
         });
       }
 
       await req.db.query(`DELETE FROM bakim_plani WHERE plan_id = $1`, [req.params.plan_id]);
       res.json({ mesaj: "Bakım planı silindi." });
     } catch (err) {
+      await req.db.query("ROLLBACK").catch(() => {});
       next(err);
     }
   }
