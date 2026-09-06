@@ -429,40 +429,89 @@ function pdfBakimTablosuCiz(dokuman, gorevler) {
 }
 
 // GET /api/v1/raporlar/ozet-banner?baslangic=&bitis= — santral bazlı devam
-// eden/geciken/tamamlanan sayılarını döner (2. banner'daki dairesel
-// göstergeler için). Geciken sayısı her zaman GÜNCEL (dönem filtresinden
-// bağımsız) hesaplanır — geçmişte kalan bir gecikme "bugün" hâlâ gecikmedir.
+// eden/geciken/tamamlanan/durdurulan PLAN sayılarını döner (2. banner'daki
+// dairesel göstergeler için). Bakımlar sayfasıyla AYNI kategori mantığını
+// kullanır (plan bazlı, çoklu sorumluda herkes onaylamadan tamamlanan
+// sayılmaz) — böylece banner ile Bakımlar sayfasındaki sayılar HER ZAMAN
+// birebir tutar. Geciken ve Durdurulan her zaman güncel durumu yansıtır
+// (dönem filtresinden bağımsızdır); yalnızca Devam Eden/Tamamlanan, son
+// dönem tarihine göre seçilen aralıkla sınırlanır.
 router.get("/ozet-banner", requireRole(...RAPOR_ROLLERI), async (req, res, next) => {
   try {
     const santralIdleri = await erisilenSantralIdleri(req);
     if (santralIdleri.length === 0) {
       return res.json({ veri: [] });
     }
-    const baslangic = req.query.baslangic || "1900-01-01";
-    const bitis = req.query.bitis || "2999-12-31";
 
-    const params = [santralIdleri, baslangic, bitis];
+    const params = [santralIdleri];
     let holdingKosulu = "";
     if (req.query.isletme_id) {
       params.push(req.query.isletme_id);
       holdingKosulu = ` AND s.isletme_id = $${params.length}`;
     }
 
-    const { rows } = await req.db.query(
-      `SELECT s.santral_id, s.ad AS santral_adi, s.isletme_id, i.ad AS isletme_adi,
-         COUNT(*) FILTER (WHERE g.durum IN ('BEKLIYOR','DEVAM_EDIYOR') AND g.planlanan_tarih BETWEEN $2 AND $3) AS devam_eden,
-         COUNT(*) FILTER (WHERE g.durum = 'GECIKTI') AS geciken,
-         COUNT(*) FILTER (WHERE g.durum = 'TAMAMLANDI' AND g.planlanan_tarih BETWEEN $2 AND $3) AS tamamlanan
-       FROM santral s
-       JOIN isletme i ON i.isletme_id = s.isletme_id
-       LEFT JOIN bakim_plani bp ON bp.santral_id = s.santral_id
-       LEFT JOIN bakim_gorevi g ON g.plan_id = bp.plan_id
-       WHERE s.santral_id = ANY($1::uuid[]) ${holdingKosulu}
-       GROUP BY s.santral_id, s.ad, s.isletme_id, i.ad
-       ORDER BY i.ad, s.ad`,
+    // Önce erişilebilir TÜM santralleri (planı olsun olmasın) sıfır
+    // sayımlarla map'e ekliyoruz — aksi halde hiç planı olmayan bir santral
+    // banner'da hiç görünmezdi.
+    const { rows: tumSantraller } = await req.db.query(
+      `SELECT s.santral_id, s.ad AS santral_adi, s.isletme_id, i.ad AS isletme_adi
+       FROM santral s JOIN isletme i ON i.isletme_id = s.isletme_id
+       WHERE s.santral_id = ANY($1::uuid[]) ${holdingKosulu}`,
       params
     );
-    res.json({ veri: rows });
+    const santralMap = new Map();
+    for (const s of tumSantraller) {
+      santralMap.set(s.santral_id, { ...s, devam_eden: 0, geciken: 0, tamamlanan: 0, durdurulan: 0 });
+    }
+
+    const { rows: planlar } = await req.db.query(
+      `SELECT bp.santral_id,
+         sd.son_tarih AS son_donem_tarihi,
+         CASE
+           WHEN NOT bp.aktif_mi THEN 'DURDURULAN'
+           WHEN COALESCE(sonuc.toplam, 0) > 0 AND sonuc.tamamlanan = sonuc.toplam THEN 'TAMAMLANAN'
+           WHEN COALESCE(sonuc.geciken, 0) > 0 THEN 'GECIKEN'
+           ELSE 'DEVAM_EDEN'
+         END AS kategori
+       FROM bakim_plani bp
+       LEFT JOIN LATERAL (
+         SELECT MAX(planlanan_tarih) AS son_tarih FROM bakim_gorevi WHERE plan_id = bp.plan_id
+       ) sd ON true
+       LEFT JOIN LATERAL (
+         SELECT COUNT(*) AS toplam, COUNT(*) FILTER (WHERE durum = 'TAMAMLANDI') AS tamamlanan,
+                COUNT(*) FILTER (WHERE durum = 'GECIKTI') AS geciken
+         FROM bakim_gorevi WHERE plan_id = bp.plan_id AND planlanan_tarih = sd.son_tarih
+       ) sonuc ON true
+       WHERE bp.santral_id = ANY($1::uuid[])`,
+      [[...santralMap.keys()]]
+    );
+
+    // Tarih aralığı filtresi (varsa) — yalnızca DEVAM_EDEN/TAMAMLANAN'a
+    // uygulanır; GECIKEN/DURDURULAN her zaman sayılır. Bakımlar sayfasındaki
+    // mantıkla birebir aynı.
+    const filtreli = planlar.filter((p) => {
+      if (p.kategori === "GECIKEN" || p.kategori === "DURDURULAN") return true;
+      if (!req.query.baslangic && !req.query.bitis) return true;
+      if (!p.son_donem_tarihi) return true;
+      const tarih = new Date(p.son_donem_tarihi);
+      if (req.query.baslangic && tarih < new Date(req.query.baslangic)) return false;
+      if (req.query.bitis && tarih > new Date(`${req.query.bitis}T23:59:59`)) return false;
+      return true;
+    });
+
+    for (const p of filtreli) {
+      const kayit = santralMap.get(p.santral_id);
+      if (!kayit) continue;
+      if (p.kategori === "DEVAM_EDEN") kayit.devam_eden++;
+      else if (p.kategori === "GECIKEN") kayit.geciken++;
+      else if (p.kategori === "TAMAMLANAN") kayit.tamamlanan++;
+      else if (p.kategori === "DURDURULAN") kayit.durdurulan++;
+    }
+
+    const sonuc = [...santralMap.values()].sort(
+      (a, b) => a.isletme_adi.localeCompare(b.isletme_adi) || a.santral_adi.localeCompare(b.santral_adi)
+    );
+    res.json({ veri: sonuc });
   } catch (err) {
     next(err);
   }
