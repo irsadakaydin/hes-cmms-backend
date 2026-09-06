@@ -86,12 +86,24 @@ async function girisKayitlariniTopla(req) {
 }
 
 // GET /api/v1/giris-loglari/filtre-secenekleri — Kişi (ve GM için Holding/Santral) kutularını doldurur
+// Platform Admin, ?isletme_id= ve/veya ?santral_idleri= göndererek Kişi
+// listesini yalnızca seçtiği holding/santral(ler)deki kişilerle sınırlayabilir
+// (bunlar gönderilmezse — hiçbir holding seçilmemişse — TÜM kişiler döner).
 router.get("/filtre-secenekleri", requireRole(...LOG_ROLLERI), async (req, res, next) => {
   try {
     const params = [];
     let kosul = "";
     if (!platformAdminMi(req)) {
       params.push(req.user.isletme_id);
+      kosul = `WHERE isletme_id = $1`;
+    } else if (req.query.santral_idleri) {
+      const santralIdleri = Array.isArray(req.query.santral_idleri)
+        ? req.query.santral_idleri
+        : [req.query.santral_idleri];
+      params.push(santralIdleri);
+      kosul = `WHERE kullanici_id IN (SELECT kullanici_id FROM v_kullanici_yetkili_santraller WHERE santral_id = ANY($1::uuid[]))`;
+    } else if (req.query.isletme_id) {
+      params.push(req.query.isletme_id);
       kosul = `WHERE isletme_id = $1`;
     }
     const { rows: kisiler } = await req.db.query(
