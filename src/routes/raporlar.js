@@ -312,6 +312,10 @@ async function genelRaporVerisiTopla(req) {
     params.push(req.query.periyot);
     ekKosul += ` AND bp.periyot = $${params.length}`;
   }
+  if (req.query.durum) {
+    params.push(req.query.durum);
+    ekKosul += ` AND g.durum = $${params.length}`;
+  }
 
   // Tarih aralığı filtresi — GECİKMİŞ (durum='GECIKTI') görevler bu
   // filtreden HER ZAMAN muaf tutulur: bir bakım hâlâ tamamlanmamış ve
