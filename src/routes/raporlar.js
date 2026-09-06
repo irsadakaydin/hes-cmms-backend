@@ -430,8 +430,15 @@ router.get("/ozet-banner", requireRole(...RAPOR_ROLLERI), async (req, res, next)
     const baslangic = req.query.baslangic || "1900-01-01";
     const bitis = req.query.bitis || "2999-12-31";
 
+    const params = [santralIdleri, baslangic, bitis];
+    let holdingKosulu = "";
+    if (req.query.isletme_id) {
+      params.push(req.query.isletme_id);
+      holdingKosulu = ` AND s.isletme_id = $${params.length}`;
+    }
+
     const { rows } = await req.db.query(
-      `SELECT s.santral_id, s.ad AS santral_adi, i.ad AS isletme_adi,
+      `SELECT s.santral_id, s.ad AS santral_adi, s.isletme_id, i.ad AS isletme_adi,
          COUNT(*) FILTER (WHERE g.durum IN ('BEKLIYOR','DEVAM_EDIYOR') AND g.planlanan_tarih BETWEEN $2 AND $3) AS devam_eden,
          COUNT(*) FILTER (WHERE g.durum = 'GECIKTI') AS geciken,
          COUNT(*) FILTER (WHERE g.durum = 'TAMAMLANDI' AND g.planlanan_tarih BETWEEN $2 AND $3) AS tamamlanan
@@ -439,10 +446,10 @@ router.get("/ozet-banner", requireRole(...RAPOR_ROLLERI), async (req, res, next)
        JOIN isletme i ON i.isletme_id = s.isletme_id
        LEFT JOIN bakim_plani bp ON bp.santral_id = s.santral_id
        LEFT JOIN bakim_gorevi g ON g.plan_id = bp.plan_id
-       WHERE s.santral_id = ANY($1::uuid[])
-       GROUP BY s.santral_id, s.ad, i.ad
+       WHERE s.santral_id = ANY($1::uuid[]) ${holdingKosulu}
+       GROUP BY s.santral_id, s.ad, s.isletme_id, i.ad
        ORDER BY i.ad, s.ad`,
-      [santralIdleri, baslangic, bitis]
+      params
     );
     res.json({ veri: rows });
   } catch (err) {

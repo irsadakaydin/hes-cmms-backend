@@ -61,7 +61,7 @@ router.get("/", async (req, res, next) => {
 // vermez; kopyalanan şablon her zaman kendi holdingine yazılır.
 // NOT: Bu route, "/:sablon_id" route'undan ÖNCE tanımlanmalı — aksi halde
 // Express "diger-holdingler" metnini bir sablon_id değeri sanır.
-router.get("/diger-holdingler", requireRole(...SABLON_YONETICI_ROLLERI), async (req, res, next) => {
+router.get("/diger-holdingler", requireRole("ADMIN"), async (req, res, next) => {
   try {
     const params = [];
     let kosul = "WHERE bs.aktif_mi = TRUE";
@@ -182,7 +182,7 @@ router.patch("/:sablon_id", requireRole(...SABLON_YONETICI_ROLLERI), async (req,
 // tane türetir. Kaynak HANGİ holdingden olursa olsun kopyalanabilir (başka bir
 // holdingden ödünç almak için) — ama sonuç her zaman kopyalayanın KENDİ
 // holdingine yazılır (Platform Admin isterse hedef_isletme_id belirtebilir).
-router.post("/:sablon_id/kopyala", requireRole(...SABLON_YONETICI_ROLLERI), async (req, res, next) => {
+router.post("/:sablon_id/kopyala", requireRole("ADMIN"), async (req, res, next) => {
   try {
     const { rows: kaynakRows } = await req.db.query(`SELECT * FROM bakim_sablonu WHERE sablon_id = $1`, [
       req.params.sablon_id,

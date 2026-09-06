@@ -8,6 +8,10 @@ router.use(requireAuth, withDbContext);
 
 const ISLETME_YONETICI_ROLLERI = ["ISLETME_ADMIN", "ADMIN"];
 
+// Rol hiyerarşisi — büyük sayı daha yüksek yetki demektir. "Kendi
+// yetkisinden düşük" kişileri silme kuralı bu sıralamaya göre uygulanır.
+const ROL_SIRASI = { ADMIN: 4, ISLETME_ADMIN: 3, SANTRAL_SORUMLUSU: 2, SAHA_PERSONELI: 1, IZLEYICI: 1 };
+
 /** Hedef kullanıcının, isteği yapanın işletmesiyle aynı işletmede olup olmadığını kontrol eder. */
 async function ayniIsletmedeMi(req, hedefKullaniciId) {
   const { rows } = await req.db.query(`SELECT isletme_id FROM kullanici WHERE kullanici_id = $1`, [
@@ -343,6 +347,56 @@ router.post(
       ]);
       res.json({ mesaj: "Şifre güncellendi." });
     } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// DELETE /api/v1/kullanicilar/:kullanici_id — GM ve İşletme Admin, kendi
+// yetki seviyesinden DAHA DÜŞÜK rütbedeki bir kullanıcıyı kalıcı olarak
+// silebilir (eşit ya da yüksek rütbeli biri silinemez — ör. bir İşletme
+// Admin başka bir İşletme Admin'i ya da Platform Admin'i silemez). Bakım
+// görev geçmişi olan bir kullanıcı silinirse veritabanı bunu reddeder —
+// bu durumda "engelle" kullanılması önerilir.
+router.delete(
+  "/kullanicilar/:kullanici_id",
+  requireRole(...ISLETME_YONETICI_ROLLERI),
+  async (req, res, next) => {
+    try {
+      if (req.params.kullanici_id === req.user.kullanici_id) {
+        return res.status(400).json({ hata_kodu: "KENDINI_SILEMEZ", mesaj: "Kendi hesabınızı silemezsiniz." });
+      }
+
+      const { bulundu, ayni } = await ayniIsletmedeMi(req, req.params.kullanici_id);
+      if (!bulundu) {
+        return res.status(404).json({ hata_kodu: "KULLANICI_BULUNAMADI", mesaj: "Kullanıcı bulunamadı." });
+      }
+      if (!ayni) {
+        return res.status(403).json({ hata_kodu: "YETKI_YOK", mesaj: "Bu kullanıcıya erişim yetkiniz yok." });
+      }
+
+      const { rows: hedefRows } = await req.db.query(`SELECT rol FROM kullanici WHERE kullanici_id = $1`, [
+        req.params.kullanici_id,
+      ]);
+      const hedefRol = hedefRows[0].rol;
+      if (ROL_SIRASI[req.user.rol] <= ROL_SIRASI[hedefRol]) {
+        return res.status(403).json({
+          hata_kodu: "YETKI_YOK",
+          mesaj: "Yalnızca kendi yetki seviyenizden daha düşük rütbedeki kullanıcıları silebilirsiniz.",
+        });
+      }
+
+      await req.db.query(`DELETE FROM kullanici WHERE kullanici_id = $1`, [req.params.kullanici_id]);
+      res.json({ mesaj: "Kullanıcı silindi." });
+    } catch (err) {
+      // Kullanıcının bakım görevi/kaydı gibi geçmiş verisi varsa veritabanı
+      // silmeyi reddeder (foreign key kısıtlaması) — anlamlı bir mesaj verelim.
+      if (err.code === "23503") {
+        return res.status(409).json({
+          hata_kodu: "KULLANICI_GECMISI_VAR",
+          mesaj: "Bu kullanıcının bakım geçmişi/kayıtları var, silinemez. Bunun yerine hesabı engelleyin.",
+        });
+      }
       next(err);
     }
   }
