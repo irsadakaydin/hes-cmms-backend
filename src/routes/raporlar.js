@@ -490,7 +490,9 @@ router.get("/ozet-banner", requireRole(...RAPOR_ROLLERI), async (req, res, next)
     // uygulanır; GECIKEN/DURDURULAN her zaman sayılır. Bakımlar sayfasındaki
     // mantıkla birebir aynı.
     const filtreli = planlar.filter((p) => {
-      if (p.kategori === "GECIKEN" || p.kategori === "DURDURULAN") return true;
+      // Yalnızca TAMAMLANAN bir tarih aralığına göre süzülür — DEVAM_EDEN,
+      // GECİKEN ve DURDURULAN tarihten bağımsız GÜNCEL bir durumdur.
+      if (p.kategori !== "TAMAMLANAN") return true;
       if (!req.query.baslangic && !req.query.bitis) return true;
       if (!p.son_donem_tarihi) return true;
       const tarih = new Date(p.son_donem_tarihi);
