@@ -924,7 +924,7 @@ router.get("/tamamlanan-gorevler", requireRole(...RAPOR_ROLLERI), async (req, re
     }
 
     const { rows } = await req.db.query(
-      `SELECT g.gorev_id, bk.tamamlanma_tarihi,
+      `SELECT g.gorev_id, g.planlanan_tarih, bp.periyot, bk.tamamlanma_tarihi,
               s.ad AS santral_adi, e.ad AS ekipman_adi, bs.ad AS bakim_adi,
               k.ad_soyad AS tamamlayan_adi
        FROM bakim_gorevi g
