@@ -1,18 +1,23 @@
 /**
  * =====================================================================
  * HES CMMS — ZAMANLAYICI SERVİSİ (SCHEDULER)
- * Rev. 1.0 — Eylül 2026
+ * Rev. 2.0 — Eylül 2026 (çoklu sorumlu modeli + yeni periyotlar + süre
+ * bazlı gecikme mantığına güncellendi)
  *
  * Bu betik, hes_cmms_schema.sql şemasına göre çalışan, GÜNDE BİR KEZ
  * (örn. her gün 06:00'da) tetiklenmesi gereken arka plan işidir.
  * Üç görevi vardır:
  *
  *   1) generateUpcomingTasks()  — Aktif bakim_plani kayıtlarından,
- *      periyoduna göre sırası gelen bakim_gorevi kayıtlarını üretir.
+ *      periyoduna göre sırası gelen bakim_gorevi kayıtlarını, planın HER
+ *      BİR sorumlusu (bakim_plani_sorumlu) için AYRI AYRI üretir.
  *   2) sendReminders()          — Planlanan tarihi yaklaşan görevler
  *      için kullanıcıya hatırlatma bildirimi gönderir.
- *   3) markOverdueAndEscalate() — Tarihi geçmiş, hâlâ tamamlanmamış
- *      görevleri "GECIKTI" yapar ve sorumluya ikinci bir uyarı gönderir.
+ *   3) markOverdueAndEscalate() — Yalnızca o DÖNEMİN SÜRESİ (bir sonraki
+ *      dönemin başlangıcı, ya da varsa plan bitiş tarihi) geçtiği hâlde
+ *      hâlâ tamamlanmamış görevleri "GECIKTI" yapar. Görevi yapmaya
+ *      henüz zaman varsa (dönem sürmekteyse) "Bekliyor" olarak kalır —
+ *      başlangıç tarihi geçmiş olması TEK BAŞINA yeterli değildir.
  *
  * Çalıştırma:
  *   node hes_cmms_scheduler.js
@@ -41,7 +46,9 @@ const HATIRLATMA_GUN_SAYISI = 2;
 const URETIM_UFKU_GUN = 14;
 
 // ---------------------------------------------------------------------
-// Periyot → tarih ekleme yardımcı fonksiyonu
+// Periyot → tarih ekleme yardımcı fonksiyonu — hem "bir sonraki dönem ne
+// zaman üretilecek" hem de "bu dönemin SÜRESİ ne zaman dolar" (gecikme
+// tespiti) için kullanılır; ikisi aynı hesaplamadır.
 // ---------------------------------------------------------------------
 function periyotEkle(tarih, periyot) {
   const d = new Date(tarih);
@@ -64,6 +71,18 @@ function periyotEkle(tarih, periyot) {
     case "YILLIK":
       d.setFullYear(d.getFullYear() + 1);
       break;
+    case "IKI_YILLIK":
+      d.setFullYear(d.getFullYear() + 2);
+      break;
+    case "UC_YILLIK":
+      d.setFullYear(d.getFullYear() + 3);
+      break;
+    case "BES_YILLIK":
+      d.setFullYear(d.getFullYear() + 5);
+      break;
+    case "ON_YILLIK":
+      d.setFullYear(d.getFullYear() + 10);
+      break;
     default:
       throw new Error(`Bilinmeyen periyot tipi: ${periyot}`);
   }
@@ -71,7 +90,7 @@ function periyotEkle(tarih, periyot) {
 }
 
 function tarihStr(d) {
-  return d.toISOString().slice(0, 10); // 'YYYY-MM-DD'
+  return new Date(d).toISOString().slice(0, 10); // 'YYYY-MM-DD'
 }
 
 // ---------------------------------------------------------------------
@@ -81,27 +100,23 @@ function tarihStr(d) {
 async function bildirimGonder({ tip, aliciEposta, aliciTelefon, konu, icerik }) {
   if (tip === "EPOSTA") {
     // TODO: gerçek e-posta gönderimi (örn. SendGrid)
-    // await sgMail.send({ to: aliciEposta, from: 'bakim@sizinsistem.com', subject: konu, text: icerik });
     console.log(`[EPOSTA → ${aliciEposta}] ${konu}: ${icerik}`);
   } else if (tip === "SMS") {
     // TODO: gerçek SMS gönderimi (örn. Netgsm)
     console.log(`[SMS → ${aliciTelefon}] ${icerik}`);
   }
-  // Gönderim başarısız olursa burada catch edip 'BASARISIZ' durumuyla
-  // kaydedebilirsiniz; sadeleştirmek için bu taslakta her zaman başarılı varsayılmıştır.
   return { basarili: true };
 }
 
 // =======================================================================
-// 1) SIRASI GELEN GÖREVLERİ ÜRET
+// 1) SIRASI GELEN GÖREVLERİ ÜRET — HER SORUMLU İÇİN AYRI GÖREV
 // =======================================================================
 async function generateUpcomingTasks(client) {
-  const bugun = new Date();
   const ufuk = new Date();
-  ufuk.setDate(bugun.getDate() + URETIM_UFKU_GUN);
+  ufuk.setDate(ufuk.getDate() + URETIM_UFKU_GUN);
 
   const { rows: planlar } = await client.query(`
-    SELECT plan_id, santral_id, periyot, baslangic_tarihi, bitis_tarihi, sorumlu_kullanici_id
+    SELECT plan_id, santral_id, periyot, baslangic_tarihi, bitis_tarihi
     FROM bakim_plani
     WHERE aktif_mi = TRUE
       AND (bitis_tarihi IS NULL OR bitis_tarihi >= CURRENT_DATE)
@@ -110,7 +125,14 @@ async function generateUpcomingTasks(client) {
   let uretilenSayisi = 0;
 
   for (const plan of planlar) {
-    // Bu plan için üretilmiş en son görevin tarihini bul
+    const { rows: sorumlular } = await client.query(
+      `SELECT kullanici_id FROM bakim_plani_sorumlu WHERE plan_id = $1`,
+      [plan.plan_id]
+    );
+    if (sorumlular.length === 0) continue; // sorumlusuz plan için görev üretilmez
+
+    // Bu plan için üretilmiş en son görevin tarihini bul (kim olursa olsun —
+    // tüm sorumlular aynı takvimde ilerler, yalnızca atanan kişi değişir)
     const { rows: sonGorevRows } = await client.query(
       `SELECT MAX(planlanan_tarih) AS son_tarih FROM bakim_gorevi WHERE plan_id = $1`,
       [plan.plan_id]
@@ -119,21 +141,20 @@ async function generateUpcomingTasks(client) {
       ? periyotEkle(sonGorevRows[0].son_tarih, plan.periyot)
       : new Date(plan.baslangic_tarihi);
 
-    // Ufuk tarihine kadar (ve varsa plan bitiş tarihine kadar) eksik olan
-    // tüm görevleri sırayla üret — sistem birkaç gün durmuş olsa bile açığı kapatır.
     while (
       sonrakiTarih <= ufuk &&
       (!plan.bitis_tarihi || sonrakiTarih <= new Date(plan.bitis_tarihi))
     ) {
-      const sonuc = await client.query(
-        `INSERT INTO bakim_gorevi (plan_id, atanan_kullanici_id, planlanan_tarih, durum)
-         VALUES ($1, $2, $3, 'BEKLIYOR')
-         ON CONFLICT (plan_id, planlanan_tarih) DO NOTHING
-         RETURNING gorev_id`,
-        [plan.plan_id, plan.sorumlu_kullanici_id, tarihStr(sonrakiTarih)]
-      );
-      if (sonuc.rowCount > 0) uretilenSayisi++;
-
+      for (const sorumlu of sorumlular) {
+        const sonuc = await client.query(
+          `INSERT INTO bakim_gorevi (plan_id, atanan_kullanici_id, planlanan_tarih, durum)
+           VALUES ($1, $2, $3, 'BEKLIYOR')
+           ON CONFLICT (plan_id, planlanan_tarih, atanan_kullanici_id) DO NOTHING
+           RETURNING gorev_id`,
+          [plan.plan_id, sorumlu.kullanici_id, tarihStr(sonrakiTarih)]
+        );
+        if (sonuc.rowCount > 0) uretilenSayisi++;
+      }
       sonrakiTarih = periyotEkle(sonrakiTarih, plan.periyot);
     }
   }
@@ -166,7 +187,7 @@ async function sendReminders(client) {
   let gonderilenSayisi = 0;
 
   for (const g of gorevler) {
-    const icerik = `${g.santral_adi} – ${g.sablon_adi} bakımı ${g.planlanan_tarih.toISOString().slice(0, 10)} tarihinde planlandı.`;
+    const icerik = `${g.santral_adi} – ${g.sablon_adi} bakımı ${tarihStr(g.planlanan_tarih)} tarihinde planlandı.`;
 
     await bildirimGonder({
       tip: "EPOSTA",
@@ -195,26 +216,45 @@ async function sendReminders(client) {
 
 // =======================================================================
 // 3) GECİKMİŞ GÖREVLERİ İŞARETLE VE SORUMLUYA UYARI GÖNDER
+// Yalnızca dönemin SÜRESİ dolduğunda (bir sonraki dönemin başlangıcı, ya da
+// varsa daha erken bir plan bitiş tarihi) geçmişse "GECIKTI" yapılır —
+// başlangıç tarihinin geçmiş olması TEK BAŞINA yeterli değildir; görevi
+// yapmaya hâlâ zaman varsa "Bekliyor" olarak kalmaya devam eder.
 // =======================================================================
 async function markOverdueAndEscalate(client) {
-  const { rows: gecikenler } = await client.query(`
-    UPDATE bakim_gorevi
-    SET durum = 'GECIKTI'
-    WHERE durum = 'BEKLIYOR'
-      AND planlanan_tarih < CURRENT_DATE
-    RETURNING gorev_id, plan_id, atanan_kullanici_id, planlanan_tarih
+  const { rows: adaylar } = await client.query(`
+    SELECT g.gorev_id, g.plan_id, g.atanan_kullanici_id, g.planlanan_tarih,
+           bp.periyot, bp.bitis_tarihi
+    FROM bakim_gorevi g
+    JOIN bakim_plani bp ON bp.plan_id = g.plan_id
+    WHERE g.durum = 'BEKLIYOR'
   `);
+
+  const bugun = new Date(new Date().toDateString());
+  const gecikenler = [];
+
+  for (const g of adaylar) {
+    let sonTarih = periyotEkle(g.planlanan_tarih, g.periyot);
+    if (g.bitis_tarihi) {
+      const bitis = new Date(g.bitis_tarihi);
+      if (bitis < sonTarih) sonTarih = bitis;
+    }
+    if (bugun > sonTarih) {
+      await client.query(`UPDATE bakim_gorevi SET durum = 'GECIKTI' WHERE gorev_id = $1`, [g.gorev_id]);
+      gecikenler.push(g);
+    }
+  }
 
   let uyariSayisi = 0;
 
   for (const g of gecikenler) {
-    // Görevi hem atanan kullanıcıya hem de planın sorumlusuna (amirine) bildir
+    // Görevi hem atanan kullanıcıya hem de planın TÜM sorumlularına bildir
     const { rows: alicilar } = await pool.query(
       `
       SELECT DISTINCT k.kullanici_id, k.eposta, k.ad_soyad
       FROM kullanici k
       WHERE k.kullanici_id = $1
-         OR k.kullanici_id = (SELECT sorumlu_kullanici_id FROM bakim_plani WHERE plan_id = $2)
+         OR k.kullanici_id IN (SELECT kullanici_id FROM bakim_plani_sorumlu WHERE plan_id = $2)
       `,
       [g.atanan_kullanici_id, g.plan_id]
     );
