@@ -97,22 +97,34 @@ router.get("/diger-holdingler", requireRole("ADMIN"), async (req, res, next) => 
 });
 
 // GET /api/v1/bakim-sablonlari/saha-personeli?isletme_id=X — "Oto Bakım
-// Planla" sayfasında sorumlu seçimi için, belirtilen holdingin saha
-// personelini listeler. Platform Admin herhangi bir holding için
-// sorgulayabilir; diğerleri yalnızca kendi holdingi için.
+// Planla" sayfasında sorumlu seçimi için, belirtilen SANTRALE erişimi olan
+// saha personelini listeler (holding genelini değil — başka santrallerin
+// personeli karışmasın diye). Platform Admin/İşletme Admin herhangi bir
+// santral için sorgulayabilir; Santral Sorumlusu yalnızca erişimi olan
+// santraller için.
 // NOT: Bu route, "/:sablon_id" route'undan ÖNCE tanımlanmalı — aksi halde
 // Express "saha-personeli" metnini bir sablon_id değeri sanır.
 router.get("/saha-personeli", requireRole(...SABLON_YONETICI_ROLLERI), async (req, res, next) => {
   try {
-    const hedefIsletmeId = platformAdminMi(req) ? req.query.isletme_id : req.user.isletme_id;
-    if (!hedefIsletmeId) {
-      return res.status(400).json({ hata_kodu: "EKSIK_ALAN", mesaj: "isletme_id belirtilmelidir." });
+    const { santral_id } = req.query;
+    if (!santral_id) {
+      return res.status(400).json({ hata_kodu: "EKSIK_ALAN", mesaj: "santral_id belirtilmelidir." });
+    }
+    const { rows: erisimRows } = await req.db.query(
+      `SELECT 1 FROM v_kullanici_yetkili_santraller WHERE kullanici_id = $1 AND santral_id = $2`,
+      [req.user.kullanici_id, santral_id]
+    );
+    if (!erisimRows[0]) {
+      return res.status(403).json({ hata_kodu: "YETKI_YOK", mesaj: "Bu santrale erişim yetkiniz yok." });
     }
     const { rows } = await req.db.query(
-      `SELECT kullanici_id, ad_soyad FROM kullanici
-       WHERE isletme_id = $1 AND rol = 'SAHA_PERSONELI' AND aktif_mi = TRUE
-       ORDER BY ad_soyad`,
-      [hedefIsletmeId]
+      `SELECT k.kullanici_id, k.ad_soyad FROM kullanici k
+       WHERE k.rol = 'SAHA_PERSONELI' AND k.aktif_mi = TRUE
+         AND k.kullanici_id IN (
+           SELECT kullanici_id FROM v_kullanici_yetkili_santraller WHERE santral_id = $1
+         )
+       ORDER BY k.ad_soyad`,
+      [santral_id]
     );
     res.json({ veri: rows });
   } catch (err) {
@@ -423,7 +435,7 @@ router.post("/:sablon_id/oto-planla", requireRole(...SABLON_YONETICI_ROLLERI), a
       return res.status(403).json({ hata_kodu: "YETKI_YOK", mesaj: "Bu şablona erişim yetkiniz yok." });
     }
 
-    const { sorumlu_kullanici_idleri, baslangic_tarihi, bitis_tarihi } = req.body;
+    const { sorumlu_kullanici_idleri, baslangic_tarihi, bitis_tarihi, santral_id } = req.body;
     if (!Array.isArray(sorumlu_kullanici_idleri) || sorumlu_kullanici_idleri.length === 0) {
       return res.status(400).json({
         hata_kodu: "EKSIK_ALAN",
@@ -440,15 +452,41 @@ router.post("/:sablon_id/oto-planla", requireRole(...SABLON_YONETICI_ROLLERI), a
       });
     }
 
-    // Hedef santraller: şablon belirli bir santrale özelse yalnızca o
-    // santral; değilse şablonun holdingindeki TÜM santraller.
-    const { rows: santralRows } = await req.db.query(
-      sablon.santral_id
-        ? `SELECT santral_id FROM santral WHERE santral_id = $1`
-        : `SELECT santral_id FROM santral WHERE isletme_id = $1`,
-      [sablon.santral_id || sablon.isletme_id]
-    );
-    const santralIdleri = santralRows.map((r) => r.santral_id);
+    // Hedef santraller: gövdede santral_id verilmişse (sayfa artık her
+    // zaman belirli bir santral için çalıştığından bu her zaman verilir)
+    // yalnızca O santral; verilmemişse eski davranış (şablon tek bir
+    // santrale özelse o santral, değilse holdingin tamamı) uygulanır.
+    let santralIdleri;
+    if (santral_id) {
+      const { rows: santralRows } = await req.db.query(
+        `SELECT santral_id, isletme_id FROM santral WHERE santral_id = $1`,
+        [santral_id]
+      );
+      if (!santralRows[0]) {
+        return res.status(404).json({ hata_kodu: "SANTRAL_BULUNAMADI", mesaj: "Santral bulunamadı." });
+      }
+      if (sablon.santral_id && sablon.santral_id !== santral_id) {
+        return res.status(400).json({
+          hata_kodu: "GECERSIZ_SANTRAL",
+          mesaj: "Bu şablon başka bir santrale özel, bu santral için kullanılamaz.",
+        });
+      }
+      if (!sablon.santral_id && santralRows[0].isletme_id !== sablon.isletme_id) {
+        return res.status(400).json({
+          hata_kodu: "GECERSIZ_SANTRAL",
+          mesaj: "Bu santral, şablonun ait olduğu holdinge ait değil.",
+        });
+      }
+      santralIdleri = [santral_id];
+    } else {
+      const { rows: santralRows } = await req.db.query(
+        sablon.santral_id
+          ? `SELECT santral_id FROM santral WHERE santral_id = $1`
+          : `SELECT santral_id FROM santral WHERE isletme_id = $1`,
+        [sablon.santral_id || sablon.isletme_id]
+      );
+      santralIdleri = santralRows.map((r) => r.santral_id);
+    }
 
     // Bu şablonun ekipman tipiyle eşleşen, henüz bu şablon için aktif bir
     // planı OLMAYAN tüm ekipmanları bul.
