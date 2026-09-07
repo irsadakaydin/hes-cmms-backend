@@ -1,4 +1,7 @@
 const express = require("express");
+const path = require("path");
+const PDFDocument = require("pdfkit");
+const QRCode = require("qrcode");
 const { requireAuth, requireRole } = require("../middleware/auth");
 const { withDbContext } = require("../middleware/dbContext");
 
@@ -176,6 +179,119 @@ router.get("/:sablon_id", async (req, res, next) => {
       return res.status(403).json({ hata_kodu: "YETKI_YOK", mesaj: "Bu şablona erişim yetkiniz yok." });
     }
     res.json(sablon);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/v1/bakim-sablonlari/:sablon_id/karekod-ekipmanlari — KAREKOD
+// OKUTMA sayfası içindir. Bakımlarımızın temeli şablon üzerinden ilerlediği
+// için karekod EKİPMANA değil ŞABLONA basılır; okutulduğunda bu şablonun
+// ekipman tipiyle eşleşen, şablonun kapsamındaki (santrale özelse o
+// santral, değilse holdingin tüm santralleri) aktif ekipmanları listeler.
+// Rol kısıtlaması YOKTUR — yalnızca oturum açmış olmak yeterlidir.
+router.get("/:sablon_id/karekod-ekipmanlari", async (req, res, next) => {
+  try {
+    const { rows: sablonRows } = await req.db.query(`SELECT * FROM bakim_sablonu WHERE sablon_id = $1`, [
+      req.params.sablon_id,
+    ]);
+    const sablon = sablonRows[0];
+    if (!sablon || !sablon.aktif_mi) {
+      return res.status(404).json({ hata_kodu: "SABLON_BULUNAMADI", mesaj: "Bakım şablonu bulunamadı ya da pasif." });
+    }
+
+    const { rows: ekipmanlar } = await req.db.query(
+      sablon.santral_id
+        ? `SELECT e.ekipman_id, e.ad, e.unite_no, s.ad AS santral_adi
+           FROM ekipman e JOIN santral s ON s.santral_id = e.santral_id
+           WHERE e.santral_id = $1 AND e.tip = $2 AND e.durum = 'AKTIF'
+           ORDER BY e.ad`
+        : `SELECT e.ekipman_id, e.ad, e.unite_no, s.ad AS santral_adi
+           FROM ekipman e JOIN santral s ON s.santral_id = e.santral_id
+           WHERE s.isletme_id = $1 AND e.tip = $2 AND e.durum = 'AKTIF'
+           ORDER BY s.ad, e.ad`,
+      [sablon.santral_id || sablon.isletme_id, sablon.ekipman_tipi]
+    );
+
+    res.json({
+      sablon: { sablon_id: sablon.sablon_id, ad: sablon.ad, periyot_tipi: sablon.periyot_tipi, ekipman_tipi: sablon.ekipman_tipi },
+      ekipmanlar,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+const FONT_NORMAL = path.join(__dirname, "..", "DejaVuSans.ttf");
+const FONT_KALIN = path.join(__dirname, "..", "DejaVuSans-Bold.ttf");
+const PERIYOT_ETIKETLERI_PDF = {
+  GUNLUK: "Günlük", HAFTALIK: "Haftalık", AYLIK: "Aylık", UC_AYLIK: "3 Ayda Bir",
+  ALTI_AYLIK: "6 Ayda Bir", YILLIK: "Yıllık", IKI_YILLIK: "2 Yılda Bir",
+  UC_YILLIK: "3 Yılda Bir", BES_YILLIK: "5 Yılda Bir", ON_YILLIK: "10 Yılda Bir",
+};
+
+// GET /api/v1/bakim-sablonlari/:sablon_id/karekod-pdf — bu şablonun TEK ve
+// KALICI karekodunu (her zaman aynı sablon_id'den üretildiği için içeriği
+// hep aynıdır) yazdırılabilir bir PDF olarak indirir. Harici bir servise
+// bağımlı kalmadan (qrcode paketiyle) sunucu tarafında üretilir.
+router.get("/:sablon_id/karekod-pdf", async (req, res, next) => {
+  try {
+    const { rows } = await req.db.query(`SELECT * FROM bakim_sablonu WHERE sablon_id = $1`, [
+      req.params.sablon_id,
+    ]);
+    const sablon = rows[0];
+    if (!sablon) {
+      return res.status(404).json({ hata_kodu: "SABLON_BULUNAMADI", mesaj: "Bakım şablonu bulunamadı." });
+    }
+    if (!platformAdminMi(req) && sablon.isletme_id !== req.user.isletme_id) {
+      return res.status(403).json({ hata_kodu: "YETKI_YOK", mesaj: "Bu şablona erişim yetkiniz yok." });
+    }
+
+    const frontendUrl = (process.env.FRONTEND_URLS || "").split(",")[0]?.trim() || "";
+    const karekodAdresi = `${frontendUrl}/karekod-sablon/${sablon.sablon_id}`;
+    const qrDataUrl = await QRCode.toDataURL(karekodAdresi, { width: 500, margin: 1 });
+    const qrBuffer = Buffer.from(qrDataUrl.split(",")[1], "base64");
+
+    const guvenliDosyaAdi = sablon.ad
+      .replace(/[ışŞğĞüÜöÖçÇİ]/g, (ch) => ({ ı: "i", İ: "I", ş: "s", Ş: "S", ğ: "g", Ğ: "G", ü: "u", Ü: "U", ö: "o", Ö: "O", ç: "c", Ç: "C" }[ch] || ch))
+      .replace(/[^\x20-\x7E]/g, "")
+      .replace(/\s+/g, "-");
+    const utf8Ad = encodeURIComponent(`karekod-${sablon.ad}.pdf`);
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="karekod-${guvenliDosyaAdi}.pdf"; filename*=UTF-8''${utf8Ad}`);
+
+    const dokuman = new PDFDocument({ size: "A4", margin: 50 });
+    res.on("error", (err) => console.error("Karekod PDF akış hatası:", err.message));
+    dokuman.on("error", (err) => console.error("Karekod PDF üretim hatası:", err.message));
+    dokuman.pipe(res);
+    dokuman.registerFont("DejaVu", FONT_NORMAL);
+    dokuman.registerFont("DejaVu-Bold", FONT_KALIN);
+
+    dokuman
+      .font("DejaVu-Bold")
+      .fontSize(16)
+      .fillColor("#0f3d3e")
+      .text(sablon.ad, { align: "center" });
+    dokuman.moveDown(0.3);
+    dokuman
+      .font("DejaVu")
+      .fontSize(11)
+      .fillColor("#5b6b62")
+      .text(`${sablon.ekipman_tipi} — ${PERIYOT_ETIKETLERI_PDF[sablon.periyot_tipi] || sablon.periyot_tipi}`, { align: "center" });
+    dokuman.moveDown(1.5);
+
+    const qrGenislik = 300;
+    const sayfaGenisligi = dokuman.page.width - 100;
+    dokuman.image(qrBuffer, 50 + (sayfaGenisligi - qrGenislik) / 2, dokuman.y, { width: qrGenislik });
+    dokuman.y += qrGenislik + 20;
+
+    dokuman
+      .font("DejaVu")
+      .fontSize(10)
+      .fillColor("#5b6b62")
+      .text("Bu karekodu yazdırıp ilgili ekipmanın üzerine yapıştırın.", { align: "center" });
+
+    dokuman.end();
   } catch (err) {
     next(err);
   }
