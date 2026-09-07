@@ -247,8 +247,15 @@ router.get("/:sablon_id/karekod-pdf", async (req, res, next) => {
       return res.status(403).json({ hata_kodu: "YETKI_YOK", mesaj: "Bu şablona erişim yetkiniz yok." });
     }
 
-    const frontendUrl = (process.env.FRONTEND_URLS || "").split(",")[0]?.trim() || "";
-    const karekodAdresi = `${frontendUrl}/karekod-sablon/${sablon.sablon_id}`;
+    // Adresi öncelikle isteği yapan sayfadan (?site=) al — bu, tarayıcının o
+    // an bulunduğu GERÇEK adresi (ör. https://barajbakim.com) yansıtır ve
+    // sunucudaki FRONTEND_URLS ayarlanmamış/yanlışsa bile her zaman doğru
+    // çalışır. Hiç gönderilmezse FRONTEND_URLS'e geri döner.
+    const siteAdresi =
+      (req.query.site && decodeURIComponent(req.query.site)) ||
+      (process.env.FRONTEND_URLS || "").split(",")[0]?.trim() ||
+      "";
+    const karekodAdresi = `${siteAdresi}/karekod-sablon/${sablon.sablon_id}`;
     const qrDataUrl = await QRCode.toDataURL(karekodAdresi, { width: 500, margin: 1 });
     const qrBuffer = Buffer.from(qrDataUrl.split(",")[1], "base64");
 
@@ -660,11 +667,11 @@ router.post("/:sablon_id/oto-planla", requireRole(...SABLON_YONETICI_ROLLERI), a
     const uygunEkipman = ekipmanRows.filter((e) => !e.mukerrer);
     const mukerrerEkipman = ekipmanRows.filter((e) => e.mukerrer);
 
-    // Haftalık/Aylık gibi otomatik-tarihli periyotlarda mükerrerler sessizce
-    // atlanır (bunlar rutin/sık çalıştırılan gruplardır, her seferinde onay
-    // istemek gereksiz sürtünme yaratır). Diğer TÜM periyotlarda (3 aylık ve
-    // ötesi) mükerrer varsa ve "zorla" gönderilmemişse, hiçbir şey
-    // oluşturmadan önce kullanıcıya sorulmak üzere bilgi döneriz.
+    // Aylık sonrası TÜM periyotlarda (3 aylık ve ötesi): mükerrer varsa ve
+    // "zorla" gönderilmemişse, hiçbir şey oluşturmadan önce kullanıcıya
+    // sorulmak üzere bilgi döneriz. Haftalık/Aylık'ta ise onay istemeyiz —
+    // bunun yerine aşağıda, mevcut plana YENİ SEÇİLEN kişileri ekleyerek
+    // devam ederiz (bkz. altındaki not).
     if (!otomatikTarih && mukerrerEkipman.length > 0 && !zorla) {
       return res.status(409).json({
         hata_kodu: "MUKERRER_TESPIT_EDILDI",
@@ -674,7 +681,12 @@ router.post("/:sablon_id/oto-planla", requireRole(...SABLON_YONETICI_ROLLERI), a
       });
     }
 
-    const islenecekEkipman = otomatikTarih ? uygunEkipman : zorla ? ekipmanRows : uygunEkipman;
+    // Haftalık/Aylık'ta TÜM eşleşen ekipmanlar işlenir (mükerrer olanlar
+    // ATLANMAZ — aksi halde o ekipman için az önce SEÇTİĞİNİZ kişilere hiç
+    // görev gitmezdi). Aylık sonrası periyotlarda ise "zorla" verilmemişse
+    // yalnızca uygun (henüz planı olmayan) ekipmanlar işlenir; "zorla"
+    // verilmişse hepsi yeni birer plan olarak işlenir.
+    const islenecekEkipman = otomatikTarih ? ekipmanRows : zorla ? ekipmanRows : uygunEkipman;
 
     if (islenecekEkipman.length === 0) {
       return res.json({
@@ -689,26 +701,41 @@ router.post("/:sablon_id/oto-planla", requireRole(...SABLON_YONETICI_ROLLERI), a
     await req.db.query("BEGIN");
     try {
       for (const ekipman of islenecekEkipman) {
-        const { rows: planRows } = await req.db.query(
-          `INSERT INTO bakim_plani (santral_id, ekipman_id, sablon_id, periyot, baslangic_tarihi, bitis_tarihi)
-           VALUES ($1, $2, $3, $4, $5, $6)
-           RETURNING plan_id`,
-          [
-            ekipman.santral_id,
-            ekipman.ekipman_id,
-            req.params.sablon_id,
-            sablon.periyot_tipi,
-            nihaiBaslangic,
-            otomatikTarih ? null : bitis_tarihi || null,
-          ]
-        );
-        const planId = planRows[0].plan_id;
+        let planId;
+
+        // Haftalık/Aylık'ta, bu ekipman için bu şablona ait AKTİF bir plan
+        // zaten varsa (mükerrer), YENİ bir plan açmak yerine MEVCUT planı
+        // kullanıp seçtiğiniz kişileri o plana ekleriz — böylece yeni
+        // seçtiğiniz kişiler de görevi alır, eskisi tekrar oluşturulmaz.
+        if (otomatikTarih && ekipman.mukerrer) {
+          const { rows: mevcutPlanRows } = await req.db.query(
+            `SELECT plan_id FROM bakim_plani WHERE ekipman_id = $1 AND sablon_id = $2 AND aktif_mi = TRUE LIMIT 1`,
+            [ekipman.ekipman_id, req.params.sablon_id]
+          );
+          planId = mevcutPlanRows[0].plan_id;
+        } else {
+          const { rows: planRows } = await req.db.query(
+            `INSERT INTO bakim_plani (santral_id, ekipman_id, sablon_id, periyot, baslangic_tarihi, bitis_tarihi)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             RETURNING plan_id`,
+            [
+              ekipman.santral_id,
+              ekipman.ekipman_id,
+              req.params.sablon_id,
+              sablon.periyot_tipi,
+              nihaiBaslangic,
+              otomatikTarih ? null : bitis_tarihi || null,
+            ]
+          );
+          planId = planRows[0].plan_id;
+        }
 
         for (const kullaniciId of sorumlu_kullanici_idleri) {
-          await req.db.query(`INSERT INTO bakim_plani_sorumlu (plan_id, kullanici_id) VALUES ($1, $2)`, [
-            planId,
-            kullaniciId,
-          ]);
+          await req.db.query(
+            `INSERT INTO bakim_plani_sorumlu (plan_id, kullanici_id) VALUES ($1, $2)
+             ON CONFLICT (plan_id, kullanici_id) DO NOTHING`,
+            [planId, kullaniciId]
+          );
           await req.db.query(
             `INSERT INTO bakim_gorevi (plan_id, atanan_kullanici_id, planlanan_tarih, durum)
              VALUES ($1, $2, $3, $4)
@@ -725,7 +752,7 @@ router.post("/:sablon_id/oto-planla", requireRole(...SABLON_YONETICI_ROLLERI), a
     }
 
     res.status(201).json({
-      mesaj: `${sonuclar.length} ekipman için bakım planı oluşturuldu (başlangıç: ${nihaiBaslangic}${gorevGecikmisMi ? " — geciken olarak işaretlendi" : ""}).`,
+      mesaj: `${sonuclar.length} ekipman için görev(ler) oluşturuldu/atandı (başlangıç: ${nihaiBaslangic}${gorevGecikmisMi ? " — geciken olarak işaretlendi" : ""}).`,
       olusturulan_sayisi: sonuclar.length,
       detaylar: sonuclar,
     });
