@@ -518,23 +518,51 @@ router.post("/:sablon_id/oto-planla", requireRole(...SABLON_YONETICI_ROLLERI), a
       santralIdleri = santralRows.map((r) => r.santral_id);
     }
 
-    // Bu şablonun ekipman tipiyle eşleşen, henüz bu şablon için aktif bir
-    // planı OLMAYAN tüm ekipmanları bul.
+    // Bu şablonun ekipman tipiyle eşleşen TÜM aktif ekipmanları bul, hangileri
+    // için bu şablona ait AKTİF bir plan zaten var (mükerrer olur) ayrıca
+    // işaretle.
     const { rows: ekipmanRows } = await req.db.query(
-      `SELECT e.ekipman_id, e.santral_id, e.ad AS ekipman_adi, s.ad AS santral_adi
+      `SELECT e.ekipman_id, e.santral_id, e.ad AS ekipman_adi, s.ad AS santral_adi,
+              EXISTS (
+                SELECT 1 FROM bakim_plani bp
+                WHERE bp.ekipman_id = e.ekipman_id AND bp.sablon_id = $3 AND bp.aktif_mi = TRUE
+              ) AS mukerrer
        FROM ekipman e
        JOIN santral s ON s.santral_id = e.santral_id
-       WHERE e.santral_id = ANY($1::uuid[]) AND e.tip = $2 AND e.durum = 'AKTIF'
-         AND NOT EXISTS (
-           SELECT 1 FROM bakim_plani bp
-           WHERE bp.ekipman_id = e.ekipman_id AND bp.sablon_id = $3 AND bp.aktif_mi = TRUE
-         )`,
+       WHERE e.santral_id = ANY($1::uuid[]) AND e.tip = $2 AND e.durum = 'AKTIF'`,
       [santralIdleri, sablon.ekipman_tipi, req.params.sablon_id]
     );
 
     if (ekipmanRows.length === 0) {
       return res.json({
-        mesaj: "Uygun ekipman bulunamadı — ya bu tipte ekipman yok, ya da hepsi için zaten aktif bir plan var.",
+        mesaj: "Bu ekipman tipiyle eşleşen aktif ekipman bulunamadı.",
+        olusturulan_sayisi: 0,
+      });
+    }
+
+    const zorla = req.body.zorla === true;
+    const uygunEkipman = ekipmanRows.filter((e) => !e.mukerrer);
+    const mukerrerEkipman = ekipmanRows.filter((e) => e.mukerrer);
+
+    // Haftalık/Aylık gibi otomatik-tarihli periyotlarda mükerrerler sessizce
+    // atlanır (bunlar rutin/sık çalıştırılan gruplardır, her seferinde onay
+    // istemek gereksiz sürtünme yaratır). Diğer TÜM periyotlarda (3 aylık ve
+    // ötesi) mükerrer varsa ve "zorla" gönderilmemişse, hiçbir şey
+    // oluşturmadan önce kullanıcıya sorulmak üzere bilgi döneriz.
+    if (!otomatikTarih && mukerrerEkipman.length > 0 && !zorla) {
+      return res.status(409).json({
+        hata_kodu: "MUKERRER_TESPIT_EDILDI",
+        mesaj: `"${sablon.ad}" daha önce gönderilmiştir.`,
+        sablon_adi: sablon.ad,
+        mukerrer_sayisi: mukerrerEkipman.length,
+      });
+    }
+
+    const islenecekEkipman = otomatikTarih ? uygunEkipman : zorla ? ekipmanRows : uygunEkipman;
+
+    if (islenecekEkipman.length === 0) {
+      return res.json({
+        mesaj: "Uygun ekipman bulunamadı — hepsi için zaten aktif bir plan var.",
         olusturulan_sayisi: 0,
       });
     }
@@ -544,7 +572,7 @@ router.post("/:sablon_id/oto-planla", requireRole(...SABLON_YONETICI_ROLLERI), a
 
     await req.db.query("BEGIN");
     try {
-      for (const ekipman of ekipmanRows) {
+      for (const ekipman of islenecekEkipman) {
         const { rows: planRows } = await req.db.query(
           `INSERT INTO bakim_plani (santral_id, ekipman_id, sablon_id, periyot, baslangic_tarihi, bitis_tarihi)
            VALUES ($1, $2, $3, $4, $5, $6)
