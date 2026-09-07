@@ -7,6 +7,36 @@ router.use(requireAuth, withDbContext);
 
 const SABLON_YONETICI_ROLLERI = ["SANTRAL_SORUMLUSU", "ISLETME_ADMIN", "ADMIN"];
 
+/** Bir görev, PLANLANAN BAŞLANGIÇ tarihi geçtiği anda değil, o dönemin
+ * SÜRESİ (bir sonraki dönemin başlayacağı tarih) geçtiğinde gecikmiş
+ * sayılır — yani görevi yapmaya hâlâ zaman varsa "Bekliyor" kalır. */
+function gecikmisMi(baslangicTarihi, periyot, bitisTarihi) {
+  const bugun = new Date(new Date().toDateString());
+  let sonTarih = otomatikBaslangicTarihiIcinPeriyotEkle(baslangicTarihi, periyot);
+  if (bitisTarihi) {
+    const bitis = new Date(bitisTarihi);
+    if (bitis < sonTarih) sonTarih = bitis;
+  }
+  return bugun > sonTarih;
+}
+function otomatikBaslangicTarihiIcinPeriyotEkle(tarih, periyot) {
+  const d = new Date(tarih);
+  switch (periyot) {
+    case "GUNLUK": d.setDate(d.getDate() + 1); break;
+    case "HAFTALIK": d.setDate(d.getDate() + 7); break;
+    case "AYLIK": d.setMonth(d.getMonth() + 1); break;
+    case "UC_AYLIK": d.setMonth(d.getMonth() + 3); break;
+    case "ALTI_AYLIK": d.setMonth(d.getMonth() + 6); break;
+    case "YILLIK": d.setFullYear(d.getFullYear() + 1); break;
+    case "IKI_YILLIK": d.setFullYear(d.getFullYear() + 2); break;
+    case "UC_YILLIK": d.setFullYear(d.getFullYear() + 3); break;
+    case "BES_YILLIK": d.setFullYear(d.getFullYear() + 5); break;
+    case "ON_YILLIK": d.setFullYear(d.getFullYear() + 10); break;
+    default: d.setMonth(d.getMonth() + 1);
+  }
+  return d;
+}
+
 /** Platform Admin (ADMIN) her holdingi görür; diğerleri yalnızca kendi işletmesini. */
 function platformAdminMi(req) {
   return req.user.rol === "ADMIN";
@@ -509,7 +539,7 @@ router.post("/:sablon_id/oto-planla", requireRole(...SABLON_YONETICI_ROLLERI), a
       });
     }
 
-    const bugunKucukEsitMi = new Date(nihaiBaslangic) <= new Date(new Date().toDateString());
+    const gorevGecikmisMi = gecikmisMi(nihaiBaslangic, sablon.periyot_tipi, otomatikTarih ? null : bitis_tarihi);
     const sonuclar = [];
 
     await req.db.query("BEGIN");
@@ -539,7 +569,7 @@ router.post("/:sablon_id/oto-planla", requireRole(...SABLON_YONETICI_ROLLERI), a
             `INSERT INTO bakim_gorevi (plan_id, atanan_kullanici_id, planlanan_tarih, durum)
              VALUES ($1, $2, $3, $4)
              ON CONFLICT (plan_id, planlanan_tarih, atanan_kullanici_id) DO NOTHING`,
-            [planId, kullaniciId, nihaiBaslangic, bugunKucukEsitMi ? "GECIKTI" : "BEKLIYOR"]
+            [planId, kullaniciId, nihaiBaslangic, gorevGecikmisMi ? "GECIKTI" : "BEKLIYOR"]
           );
         }
         sonuclar.push({ ekipman_adi: ekipman.ekipman_adi, santral_adi: ekipman.santral_adi });
@@ -551,7 +581,7 @@ router.post("/:sablon_id/oto-planla", requireRole(...SABLON_YONETICI_ROLLERI), a
     }
 
     res.status(201).json({
-      mesaj: `${sonuclar.length} ekipman için bakım planı oluşturuldu (başlangıç: ${nihaiBaslangic}${bugunKucukEsitMi ? " — geciken olarak işaretlendi" : ""}).`,
+      mesaj: `${sonuclar.length} ekipman için bakım planı oluşturuldu (başlangıç: ${nihaiBaslangic}${gorevGecikmisMi ? " — geciken olarak işaretlendi" : ""}).`,
       olusturulan_sayisi: sonuclar.length,
       detaylar: sonuclar,
     });

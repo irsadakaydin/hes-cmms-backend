@@ -7,6 +7,43 @@ router.use(requireAuth, withDbContext);
 
 const YONETICI_ROLLERI = ["SANTRAL_SORUMLUSU", "ISLETME_ADMIN", "ADMIN"];
 
+/** Bir periyoda bir dönem süresi ekler — "bir sonraki dönem ne zaman
+ * başlar" sorusuna cevap verir, dolayısıyla "bu görevin son tarihi" olarak
+ * kullanılır (bkz. gecikmisMi). */
+function periyotEkle(tarih, periyot) {
+  const d = new Date(tarih);
+  switch (periyot) {
+    case "GUNLUK": d.setDate(d.getDate() + 1); break;
+    case "HAFTALIK": d.setDate(d.getDate() + 7); break;
+    case "AYLIK": d.setMonth(d.getMonth() + 1); break;
+    case "UC_AYLIK": d.setMonth(d.getMonth() + 3); break;
+    case "ALTI_AYLIK": d.setMonth(d.getMonth() + 6); break;
+    case "YILLIK": d.setFullYear(d.getFullYear() + 1); break;
+    case "IKI_YILLIK": d.setFullYear(d.getFullYear() + 2); break;
+    case "UC_YILLIK": d.setFullYear(d.getFullYear() + 3); break;
+    case "BES_YILLIK": d.setFullYear(d.getFullYear() + 5); break;
+    case "ON_YILLIK": d.setFullYear(d.getFullYear() + 10); break;
+    default: d.setMonth(d.getMonth() + 1);
+  }
+  return d;
+}
+
+/** Bir görev, PLANLANAN BAŞLANGIÇ tarihi geçtiği anda değil, o dönemin
+ * SÜRESİ (bir sonraki dönemin başlayacağı tarih) geçtiğinde gecikmiş
+ * sayılır — yani görevi yapmaya hâlâ zaman varsa "Bekliyor" kalır, süre
+ * dolmadan "Geciken" olarak işaretlenmez. bitisTarihi verilmişse (elle
+ * girilen periyotlarda) o, hesaplanan dönem sonu tarihinden ÖNCEYSE onun
+ * yerine kullanılır (kullanıcı daha kısa bir son tarih belirlemiş demektir). */
+function gecikmisMi(baslangicTarihi, periyot, bitisTarihi) {
+  const bugun = new Date(new Date().toDateString());
+  let sonTarih = periyotEkle(baslangicTarihi, periyot);
+  if (bitisTarihi) {
+    const bitis = new Date(bitisTarihi);
+    if (bitis < sonTarih) sonTarih = bitis;
+  }
+  return bugun > sonTarih;
+}
+
 async function santralErisimVarMi(req, santral_id) {
   const { rows } = await req.db.query(
     `SELECT 1 FROM v_kullanici_yetkili_santraller WHERE kullanici_id = $1 AND santral_id = $2`,
@@ -177,13 +214,13 @@ router.post(
         );
       }
 
-      const bugunKucukEsitMi = new Date(baslangic_tarihi) <= new Date(new Date().toDateString());
+      const gorevGecikmisMi = gecikmisMi(baslangic_tarihi, periyot, bitis_tarihi);
       for (const kullaniciId of sorumlu_kullanici_idleri) {
         await req.db.query(
           `INSERT INTO bakim_gorevi (plan_id, atanan_kullanici_id, planlanan_tarih, durum)
            VALUES ($1, $2, $3, $4)
            ON CONFLICT (plan_id, planlanan_tarih, atanan_kullanici_id) DO NOTHING`,
-          [yeniPlan.plan_id, kullaniciId, baslangic_tarihi, bugunKucukEsitMi ? "GECIKTI" : "BEKLIYOR"]
+          [yeniPlan.plan_id, kullaniciId, baslangic_tarihi, gorevGecikmisMi ? "GECIKTI" : "BEKLIYOR"]
         );
       }
 
@@ -268,12 +305,13 @@ router.patch("/bakim-planlari/:plan_id", requireRole(...YONETICI_ROLLERI), async
         );
       }
       if (eklenenler.length > 0 && bekleyenTarih) {
+        const gorevGecikmisMi = gecikmisMi(bekleyenTarih, plan.periyot, plan.bitis_tarihi);
         for (const kullaniciId of eklenenler) {
           await req.db.query(
             `INSERT INTO bakim_gorevi (plan_id, atanan_kullanici_id, planlanan_tarih, durum)
-             VALUES ($1, $2, $3, 'BEKLIYOR')
+             VALUES ($1, $2, $3, $4)
              ON CONFLICT (plan_id, planlanan_tarih, atanan_kullanici_id) DO NOTHING`,
-            [req.params.plan_id, kullaniciId, bekleyenTarih]
+            [req.params.plan_id, kullaniciId, bekleyenTarih, gorevGecikmisMi ? "GECIKTI" : "BEKLIYOR"]
           );
         }
       }
