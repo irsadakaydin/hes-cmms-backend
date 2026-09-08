@@ -85,6 +85,48 @@ router.get("/klasorler/:klasor_id/ekipmanlar", async (req, res, next) => {
   }
 });
 
+// GET /api/v1/klasorler/:klasor_id/periyot-yapraklari — bu düğümün (bir
+// ekipman düğümü) altındaki periyot yapraklarını (Haftalık/Aylık/vb.)
+// döner. Şablon Oluştur ve Bakım Planı Oluştur'da, Ekipman seçildikten
+// sonra "Periyot" açılır kutusunu doldurmak için kullanılır.
+router.get("/klasorler/:klasor_id/periyot-yapraklari", async (req, res, next) => {
+  try {
+    const { rows } = await req.db.query(
+      `SELECT klasor_id, ad, periyot_tipi,
+              (SELECT COUNT(*) FROM bakim_sablonu bs WHERE bs.klasor_id = k.klasor_id AND bs.aktif_mi = TRUE) AS sablon_sayisi
+       FROM ekipman_klasoru k
+       WHERE k.ust_klasor_id = $1 AND k.periyot_tipi IS NOT NULL
+       ORDER BY k.sira, k.ad`,
+      [req.params.klasor_id]
+    );
+    res.json({ veri: rows });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/v1/klasorler/:klasor_id/sablonlar-alt-agacta — bu düğümün (bir
+// ekipman düğümü) altındaki TÜM periyot yapraklarına yüklenmiş şablonları
+// tek seferde döner. Bakım Planı Oluştur'da "Ekipman seçildi, şimdi bu
+// ekipmana ait TÜM şablonları (hangi periyotta olursa olsun) listele"
+// ihtiyacı içindir.
+router.get("/klasorler/:klasor_id/sablonlar-alt-agacta", async (req, res, next) => {
+  try {
+    const { rows } = await req.db.query(
+      `SELECT bs.sablon_id, bs.ad, bs.periyot_tipi, bs.klasor_id
+       FROM bakim_sablonu bs
+       JOIN ekipman_klasoru yaprak ON yaprak.klasor_id = bs.klasor_id
+       WHERE yaprak.ust_klasor_id = $1 AND bs.aktif_mi = TRUE
+       ORDER BY yaprak.sira, bs.ad`,
+      [req.params.klasor_id]
+    );
+    res.json({ veri: rows });
+  } catch (err) {
+    next(err);
+
+  }
+});
+
 // POST /api/v1/santraller/:santral_id/klasorler — "Yeni Klasör Ekle".
 // Yeni eklenen ya da haritada yeri unutulan bir ekipman için, akışı
 // durdurmadan anında yeni bir klasör oluşturulmasını sağlar.
