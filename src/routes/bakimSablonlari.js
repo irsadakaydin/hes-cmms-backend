@@ -52,9 +52,9 @@ function platformAdminMi(req) {
 // (?ekipman_tipi= ile filtrelenebilir; Platform Admin isteğe bağlı ?isletme_id= ile tek bir holdinge bakabilir)
 router.get("/", async (req, res, next) => {
   try {
-    const { ekipman_tipi, isletme_id, santral_id, periyot_tipi, hepsi } = req.query;
+    const { ekipman_tipi, isletme_id, santral_id, periyot_tipi, klasor_id, hepsi } = req.query;
     const params = [];
-    let sorgu = `SELECT bs.sablon_id, bs.ad, bs.ekipman_adi, bs.ekipman_tipi, bs.unite_no, bs.periyot_tipi, bs.versiyon, bs.aktif_mi,
+    let sorgu = `SELECT bs.sablon_id, bs.ad, bs.ekipman_adi, bs.ekipman_tipi, bs.unite_no, bs.klasor_id, bs.periyot_tipi, bs.versiyon, bs.aktif_mi,
                         bs.olusturma_tarihi, bs.isletme_id, i.ad AS isletme_adi,
                         bs.santral_id, s.ad AS santral_adi
                  FROM bakim_sablonu bs
@@ -83,6 +83,10 @@ router.get("/", async (req, res, next) => {
     if (periyot_tipi) {
       params.push(periyot_tipi);
       sorgu += ` AND bs.periyot_tipi = $${params.length}`;
+    }
+    if (klasor_id) {
+      params.push(klasor_id);
+      sorgu += ` AND bs.klasor_id = $${params.length}`;
     }
     // santral_id belirtilmişse: o santrale ÖZEL şablonlar + holding genelindeki
     // (santral_id IS NULL) şablonlar — bir bakım planı oluştururken kullanılan
@@ -339,16 +343,52 @@ router.get("/:sablon_id/karekod-pdf", async (req, res, next) => {
 // her zaman kendi holdingi için oluşturur.
 router.post("/", requireRole(...SABLON_YONETICI_ROLLERI), async (req, res, next) => {
   try {
-    const { ad, ekipman_adi, ekipman_tipi, unite_no, periyot_tipi, checklist_json, santral_id } = req.body;
-    if (!ad || !ekipman_tipi || !periyot_tipi || !checklist_json) {
+    const { ad, checklist_json } = req.body;
+    let { ekipman_adi, ekipman_tipi, unite_no, periyot_tipi, santral_id, klasor_id } = req.body;
+
+    if (!ad || !checklist_json) {
       return res.status(400).json({
         hata_kodu: "EKSIK_ALAN",
-        mesaj: "ad, ekipman_tipi, periyot_tipi ve checklist_json alanları zorunludur.",
+        mesaj: "ad ve checklist_json alanları zorunludur.",
       });
     }
 
-    const hedefIsletmeId =
+    let hedefIsletmeId =
       platformAdminMi(req) && req.body.isletme_id ? req.body.isletme_id : req.user.isletme_id;
+
+    // YENİ AKIŞ: klasor_id verilmişse (klasör ağacından bir PERİYOT
+    // YAPRAĞI seçilmişse), periyot_tipi, santral_id ve holding bu
+    // düğümden OTOMATİK türetilir — kullanıcının ayrıca "Ekipman Tipi"
+    // yazmasına gerek kalmaz, eşleşme artık tamamen kimlik (ID)
+    // üzerinden, hatasız yapılır.
+    if (klasor_id) {
+      const { rows: klasorRows } = await req.db.query(
+        `SELECT k.*, s.isletme_id FROM ekipman_klasoru k JOIN santral s ON s.santral_id = k.santral_id
+         WHERE k.klasor_id = $1`,
+        [klasor_id]
+      );
+      const klasor = klasorRows[0];
+      if (!klasor) {
+        return res.status(404).json({ hata_kodu: "KLASOR_BULUNAMADI", mesaj: "Klasör bulunamadı." });
+      }
+      if (!klasor.periyot_tipi) {
+        return res.status(400).json({
+          hata_kodu: "GECERSIZ_KLASOR",
+          mesaj: "Şablon yalnızca bir PERİYOT YAPRAĞINA (Haftalık/Aylık/vb.) yüklenebilir — seçtiğiniz klasör bir üst kategoridir.",
+        });
+      }
+      periyot_tipi = klasor.periyot_tipi;
+      santral_id = klasor.santral_id;
+      hedefIsletmeId = klasor.isletme_id;
+      ekipman_tipi = ekipman_tipi || "—"; // eski zorunlu alan — yeni akışta kullanılmıyor
+    }
+
+    if (!ekipman_tipi || !periyot_tipi) {
+      return res.status(400).json({
+        hata_kodu: "EKSIK_ALAN",
+        mesaj: "klasor_id verilmemişse ekipman_tipi ve periyot_tipi zorunludur.",
+      });
+    }
 
     // santral_id verilmişse, gerçekten hedef holdinge ait bir santral olduğunu
     // doğrula — çapraz holding hatasını önler.
@@ -366,14 +406,15 @@ router.post("/", requireRole(...SABLON_YONETICI_ROLLERI), async (req, res, next)
     }
 
     const { rows } = await req.db.query(
-      `INSERT INTO bakim_sablonu (ad, ekipman_adi, ekipman_tipi, unite_no, periyot_tipi, checklist_json, olusturan_kullanici_id, isletme_id, santral_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      `INSERT INTO bakim_sablonu (ad, ekipman_adi, ekipman_tipi, unite_no, klasor_id, periyot_tipi, checklist_json, olusturan_kullanici_id, isletme_id, santral_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
        RETURNING *`,
       [
         ad,
         ekipman_adi || null,
         ekipman_tipi,
         unite_no || null,
+        klasor_id || null,
         periyot_tipi,
         JSON.stringify(checklist_json),
         req.user.kullanici_id,
@@ -686,8 +727,29 @@ router.post("/:sablon_id/oto-planla", requireRole(...SABLON_YONETICI_ROLLERI), a
     // Bu şablonun ekipman tipiyle eşleşen TÜM aktif ekipmanları bul, hangileri
     // için bu şablona ait AKTİF bir plan zaten var (mükerrer olur) ayrıca
     // işaretle.
-    const { rows: ekipmanRows } = await req.db.query(
-      `SELECT e.ekipman_id, e.santral_id, e.ad AS ekipman_adi, s.ad AS santral_adi,
+    // YENİ AKIŞ: şablon bir klasör ağacı yaprağına (klasor_id) bağlıysa,
+    // eşleşme artık metin (Ekipman Tipi) değil, doğrudan o yaprağın ÜST
+    // düğümüne (ekipman düğümü) bağlı ekipman kimlikleriyle yapılır — bu,
+    // yazım hatası kaynaklı eşleşmeme sorununu tamamen ortadan kaldırır.
+    let ekipmanSorgusu;
+    let ekipmanParams;
+    if (sablon.klasor_id) {
+      const { rows: klasorRows } = await req.db.query(
+        `SELECT ust_klasor_id FROM ekipman_klasoru WHERE klasor_id = $1`,
+        [sablon.klasor_id]
+      );
+      const ekipmanDugumId = klasorRows[0]?.ust_klasor_id;
+      ekipmanSorgusu = `SELECT e.ekipman_id, e.santral_id, e.ad AS ekipman_adi, s.ad AS santral_adi,
+              EXISTS (
+                SELECT 1 FROM bakim_plani bp
+                WHERE bp.ekipman_id = e.ekipman_id AND bp.sablon_id = $2 AND bp.aktif_mi = TRUE
+              ) AS mukerrer
+       FROM ekipman e
+       JOIN santral s ON s.santral_id = e.santral_id
+       WHERE e.santral_id = ANY($1::uuid[]) AND e.klasor_id = $3 AND e.durum = 'AKTIF'`;
+      ekipmanParams = [santralIdleri, req.params.sablon_id, ekipmanDugumId];
+    } else {
+      ekipmanSorgusu = `SELECT e.ekipman_id, e.santral_id, e.ad AS ekipman_adi, s.ad AS santral_adi,
               EXISTS (
                 SELECT 1 FROM bakim_plani bp
                 WHERE bp.ekipman_id = e.ekipman_id AND bp.sablon_id = $3 AND bp.aktif_mi = TRUE
@@ -695,9 +757,10 @@ router.post("/:sablon_id/oto-planla", requireRole(...SABLON_YONETICI_ROLLERI), a
        FROM ekipman e
        JOIN santral s ON s.santral_id = e.santral_id
        WHERE e.santral_id = ANY($1::uuid[]) AND e.tip = $2 AND e.durum = 'AKTIF'
-         AND ($4::text IS NULL OR e.unite_no = $4)`,
-      [santralIdleri, sablon.ekipman_tipi, req.params.sablon_id, sablon.unite_no || null]
-    );
+         AND ($4::text IS NULL OR e.unite_no = $4)`;
+      ekipmanParams = [santralIdleri, sablon.ekipman_tipi, req.params.sablon_id, sablon.unite_no || null];
+    }
+    const { rows: ekipmanRows } = await req.db.query(ekipmanSorgusu, ekipmanParams);
 
     if (ekipmanRows.length === 0) {
       return res.json({

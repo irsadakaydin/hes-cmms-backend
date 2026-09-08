@@ -30,7 +30,7 @@ router.get("/santraller/:santral_id/ekipmanlar", async (req, res, next) => {
     }
 
     const { rows } = await req.db.query(
-      `SELECT ekipman_id, ad, tip, unite_no, seri_no, uretici, kurulum_tarihi, konum_notu, durum
+      `SELECT ekipman_id, ad, tip, unite_no, seri_no, uretici, kurulum_tarihi, konum_notu, durum, klasor_id
        FROM ekipman WHERE santral_id = $1 ORDER BY ad`,
       [req.params.santral_id]
     );
@@ -70,16 +70,26 @@ router.post(
         return res.status(403).json({ hata_kodu: "YETKI_YOK", mesaj: "Bu santrale erişim yetkiniz yok." });
       }
 
-      const { ad, tip, unite_no, seri_no, uretici, kurulum_tarihi, konum_notu } = req.body;
+      const { ad, tip, unite_no, seri_no, uretici, kurulum_tarihi, konum_notu, klasor_id } = req.body;
       if (!ad || !tip) {
         return res.status(400).json({ hata_kodu: "EKSIK_ALAN", mesaj: "ad ve tip alanları zorunludur." });
       }
 
       const { rows } = await req.db.query(
-        `INSERT INTO ekipman (santral_id, ad, tip, unite_no, seri_no, uretici, kurulum_tarihi, konum_notu)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        `INSERT INTO ekipman (santral_id, ad, tip, unite_no, seri_no, uretici, kurulum_tarihi, konum_notu, klasor_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
          RETURNING *`,
-        [santral_id, ad, tip, unite_no || null, seri_no || null, uretici || null, kurulum_tarihi || null, konum_notu || null]
+        [
+          santral_id,
+          ad,
+          tip,
+          unite_no || null,
+          seri_no || null,
+          uretici || null,
+          kurulum_tarihi || null,
+          konum_notu || null,
+          klasor_id || null,
+        ]
       );
       res.status(201).json(rows[0]);
     } catch (err) {
@@ -103,7 +113,7 @@ router.patch("/ekipmanlar/:ekipman_id", requireRole(...YONETICI_ROLLERI), async 
     }
 
     // Yalnızca gönderilen alanları güncelle (kısmi güncelleme)
-    const izinliAlanlar = ["ad", "tip", "unite_no", "seri_no", "uretici", "kurulum_tarihi", "konum_notu", "durum"];
+    const izinliAlanlar = ["ad", "tip", "unite_no", "seri_no", "uretici", "kurulum_tarihi", "konum_notu", "durum", "klasor_id"];
     const guncellenecekler = Object.keys(req.body).filter((k) => izinliAlanlar.includes(k));
     if (guncellenecekler.length === 0) {
       return res.status(400).json({ hata_kodu: "EKSIK_ALAN", mesaj: "Güncellenecek en az bir alan gönderilmeli." });
