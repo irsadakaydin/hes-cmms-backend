@@ -31,7 +31,10 @@ router.get("/santraller/:santral_id/ekipmanlar", async (req, res, next) => {
 
     const { rows } = await req.db.query(
       `SELECT ekipman_id, ad, tip, unite_no, seri_no, uretici, kurulum_tarihi, konum_notu, durum, klasor_id
-       FROM ekipman WHERE santral_id = $1 ORDER BY ad`,
+       FROM ekipman WHERE santral_id = $1
+       ORDER BY ad,
+                CASE WHEN unite_no ~ '^\\d+$' THEN unite_no::int ELSE 999999 END,
+                unite_no`,
       [req.params.santral_id]
     );
     res.json({ veri: rows });
