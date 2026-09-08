@@ -182,11 +182,12 @@ router.get("/pdf", requireRole(...LOG_ROLLERI), async (req, res, next) => {
     dokuman.moveDown(0.6);
 
     const sutunlar = [
-      { baslik: "Ad Soyad", genislik: 180 },
-      { baslik: "E-posta", genislik: 220 },
-      { baslik: "Rol", genislik: 140 },
-      { baslik: "Holding", genislik: 130 },
+      { baslik: "Ad Soyad", genislik: 160 },
+      { baslik: "E-posta", genislik: 190 },
+      { baslik: "Rol", genislik: 120 },
+      { baslik: "Holding", genislik: 110 },
       { baslik: "Giriş Tarihi", genislik: 92 },
+      { baslik: "IP Adresi", genislik: 90 },
     ];
     const tabloSolX = 40;
     let y = dokuman.y;
@@ -222,6 +223,7 @@ router.get("/pdf", requireRole(...LOG_ROLLERI), async (req, res, next) => {
       hucreYaz(r.rol, 2, false);
       hucreYaz(r.isletme_adi, 3, false);
       hucreYaz(tarihSaatFormatla(r.giris_tarihi), 4, false);
+      hucreYaz(r.ip_adresi || "—", 5, false);
       y += SATIR_YUKSEKLIGI;
     });
 
