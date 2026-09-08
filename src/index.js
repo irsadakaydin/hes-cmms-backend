@@ -6,6 +6,7 @@ const rateLimit = require("express-rate-limit");
 
 const authRoutes = require("./routes/auth");
 const santralRoutes = require("./routes/santraller");
+const ekipmanKlasoruRoutes = require("./routes/ekipmanKlasoru");
 const gorevRoutes = require("./routes/gorevler");
 const ekipmanRoutes = require("./routes/ekipmanlar");
 const bakimPlanRoutes = require("./routes/bakimPlanlari");
@@ -87,6 +88,7 @@ app.get("/health", (req, res) => res.json({ durum: "ayakta" }));
 app.use("/api/v1/auth/login", girisSiniri);
 app.use("/api/v1/auth", authRoutes);
 app.use("/api/v1/santraller", santralRoutes);
+app.use("/api/v1", ekipmanKlasoruRoutes);
 app.use("/api/v1/gorevler", gorevRoutes);
 app.use("/api/v1/isletmeler", isletmeRoutes);
 app.use("/api/v1/bakim-sablonlari", bakimSablonRoutes);
