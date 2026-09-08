@@ -215,4 +215,99 @@ router.post(
   }
 );
 
+// DELETE /api/v1/klasorler/:klasor_id — bu klasörü, altındaki TÜM alt
+// klasörleriyle birlikte siler. Bu klasör ağacında ekipman/şablon bağlıysa
+// (?zorla=1 verilmemişse) önce sayılarıyla birlikte UYARI döner, hiçbir
+// şey silmez; ?zorla=1 verilirse bağlı ekipman/şablonlar ve onlara ait
+// bakım planı/görev geçmişiyle birlikte KALICI olarak siler.
+router.delete("/klasorler/:klasor_id", requireRole(...YONETICI_ROLLERI), async (req, res, next) => {
+  try {
+    const { rows: klasorRows } = await req.db.query(
+      `SELECT klasor_id, santral_id, ad, ust_klasor_id FROM ekipman_klasoru WHERE klasor_id = $1`,
+      [req.params.klasor_id]
+    );
+    const klasor = klasorRows[0];
+    if (!klasor) {
+      return res.status(404).json({ hata_kodu: "KLASOR_BULUNAMADI", mesaj: "Klasör bulunamadı." });
+    }
+    if (!(await santralErisimVarMi(req, klasor.santral_id))) {
+      return res.status(403).json({ hata_kodu: "YETKI_YOK", mesaj: "Bu santrale erişim yetkiniz yok." });
+    }
+
+    // Bu klasör ve TÜM alt klasörlerinin kimliklerini bul.
+    const { rows: altAgacRows } = await req.db.query(
+      `WITH RECURSIVE alt_agac AS (
+         SELECT klasor_id FROM ekipman_klasoru WHERE klasor_id = $1
+         UNION ALL
+         SELECT k.klasor_id FROM ekipman_klasoru k JOIN alt_agac a ON k.ust_klasor_id = a.klasor_id
+       )
+       SELECT klasor_id FROM alt_agac`,
+      [req.params.klasor_id]
+    );
+    const altAgacIdleri = altAgacRows.map((r) => r.klasor_id);
+
+    const { rows: ekipmanRows } = await req.db.query(
+      `SELECT ekipman_id FROM ekipman WHERE klasor_id = ANY($1::uuid[])`,
+      [altAgacIdleri]
+    );
+    const { rows: sablonRows } = await req.db.query(
+      `SELECT sablon_id FROM bakim_sablonu WHERE klasor_id = ANY($1::uuid[])`,
+      [altAgacIdleri]
+    );
+    const ekipmanIdleri = ekipmanRows.map((r) => r.ekipman_id);
+    const sablonIdleri = sablonRows.map((r) => r.sablon_id);
+
+    const zorla = req.query.zorla === "1" || req.query.zorla === "true";
+
+    if ((ekipmanIdleri.length > 0 || sablonIdleri.length > 0) && !zorla) {
+      return res.status(409).json({
+        hata_kodu: "KLASOR_DOLU",
+        mesaj: `"${klasor.ad}" klasörünün altında ${ekipmanIdleri.length} ekipman ve ${sablonIdleri.length} bakım şablonu var. Bunların hepsi (varsa bakım planı/görev geçmişiyle birlikte) kalıcı olarak silinecek. Emin misiniz?`,
+        ekipman_sayisi: ekipmanIdleri.length,
+        sablon_sayisi: sablonIdleri.length,
+      });
+    }
+
+    await req.db.query("BEGIN");
+    try {
+      if (ekipmanIdleri.length > 0 || sablonIdleri.length > 0) {
+        const { rows: planRows } = await req.db.query(
+          `SELECT plan_id FROM bakim_plani WHERE ekipman_id = ANY($1::uuid[]) OR sablon_id = ANY($2::uuid[])`,
+          [ekipmanIdleri, sablonIdleri]
+        );
+        const planIdleri = planRows.map((r) => r.plan_id);
+        if (planIdleri.length > 0) {
+          await req.db.query(
+            `DELETE FROM bakim_kaydi WHERE gorev_id IN (SELECT gorev_id FROM bakim_gorevi WHERE plan_id = ANY($1::uuid[]))`,
+            [planIdleri]
+          );
+          await req.db.query(`DELETE FROM bakim_gorevi WHERE plan_id = ANY($1::uuid[])`, [planIdleri]);
+          await req.db.query(`DELETE FROM bakim_plani_sorumlu WHERE plan_id = ANY($1::uuid[])`, [planIdleri]);
+          await req.db.query(`DELETE FROM bakim_plani WHERE plan_id = ANY($1::uuid[])`, [planIdleri]);
+        }
+        if (ekipmanIdleri.length > 0) {
+          await req.db.query(`DELETE FROM ekipman WHERE ekipman_id = ANY($1::uuid[])`, [ekipmanIdleri]);
+        }
+        if (sablonIdleri.length > 0) {
+          await req.db.query(`DELETE FROM bakim_sablonu WHERE sablon_id = ANY($1::uuid[])`, [sablonIdleri]);
+        }
+      }
+      // Klasörün kendisini sil — ekipman_klasoru.ust_klasor_id üzerindeki
+      // ON DELETE CASCADE, tüm alt klasörleri otomatik olarak birlikte siler.
+      await req.db.query(`DELETE FROM ekipman_klasoru WHERE klasor_id = $1`, [req.params.klasor_id]);
+      await req.db.query("COMMIT");
+    } catch (icErr) {
+      await req.db.query("ROLLBACK");
+      throw icErr;
+    }
+
+    res.json({
+      mesaj: `"${klasor.ad}" klasörü ve içeriği (${ekipmanIdleri.length} ekipman, ${sablonIdleri.length} şablon dahil) kalıcı olarak silindi.`,
+      ust_klasor_id: klasor.ust_klasor_id,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
 module.exports = router;
