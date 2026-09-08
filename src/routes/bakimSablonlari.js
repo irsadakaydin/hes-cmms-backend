@@ -452,6 +452,7 @@ router.patch("/:sablon_id", requireRole(...SABLON_YONETICI_ROLLERI), async (req,
     const ekipman_adi = req.body.ekipman_adi !== undefined ? req.body.ekipman_adi : eski.ekipman_adi;
     const ekipman_tipi = req.body.ekipman_tipi ?? eski.ekipman_tipi;
     const unite_no = req.body.unite_no !== undefined ? req.body.unite_no : eski.unite_no;
+    const klasor_id = req.body.klasor_id !== undefined ? req.body.klasor_id : eski.klasor_id;
     const periyot_tipi = req.body.periyot_tipi ?? eski.periyot_tipi;
     const santral_id = req.body.santral_id !== undefined ? req.body.santral_id : eski.santral_id;
     const checklist_json = req.body.checklist_json
@@ -462,10 +463,10 @@ router.patch("/:sablon_id", requireRole(...SABLON_YONETICI_ROLLERI), async (req,
     await req.db.query(`UPDATE bakim_sablonu SET aktif_mi = FALSE WHERE sablon_id = $1`, [eski.sablon_id]);
 
     const { rows: yeniRows } = await req.db.query(
-      `INSERT INTO bakim_sablonu (ad, ekipman_adi, ekipman_tipi, unite_no, periyot_tipi, checklist_json, versiyon, olusturan_kullanici_id, isletme_id, santral_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      `INSERT INTO bakim_sablonu (ad, ekipman_adi, ekipman_tipi, unite_no, klasor_id, periyot_tipi, checklist_json, versiyon, olusturan_kullanici_id, isletme_id, santral_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        RETURNING *`,
-      [ad, ekipman_adi, ekipman_tipi, unite_no, periyot_tipi, checklist_json, eski.versiyon + 1, req.user.kullanici_id, eski.isletme_id, santral_id]
+      [ad, ekipman_adi, ekipman_tipi, unite_no, klasor_id, periyot_tipi, checklist_json, eski.versiyon + 1, req.user.kullanici_id, eski.isletme_id, santral_id]
     );
     await req.db.query("COMMIT");
 
