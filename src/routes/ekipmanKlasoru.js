@@ -31,6 +31,9 @@ router.get("/santraller/:santral_id/klasorler", async (req, res, next) => {
     const { rows } = await req.db.query(
       `SELECT k.klasor_id, k.ad, k.sira, k.periyot_tipi,
               (SELECT COUNT(*) FROM ekipman_klasoru alt WHERE alt.ust_klasor_id = k.klasor_id) AS alt_sayisi,
+              EXISTS (
+                SELECT 1 FROM ekipman_klasoru alt WHERE alt.ust_klasor_id = k.klasor_id AND alt.periyot_tipi IS NOT NULL
+              ) AS alt_periyot_mu,
               (SELECT COUNT(*) FROM ekipman e WHERE e.klasor_id = k.klasor_id) AS ekipman_sayisi,
               (SELECT COUNT(*) FROM bakim_sablonu bs WHERE bs.klasor_id = k.klasor_id AND bs.aktif_mi = TRUE) AS sablon_sayisi
        FROM ekipman_klasoru k
