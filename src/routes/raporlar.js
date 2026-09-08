@@ -259,6 +259,10 @@ router.get("/filtre-secenekleri", requireRole(...RAPOR_ROLLERI), async (req, res
       [santralIdleri]
     );
 
+    // Belirli bir santral seçilmişse (?santral_id=), personel listesi
+    // YALNIZCA o santrale erişimi olan kişilerle sınırlandırılır — aksi
+    // halde holdingdeki TÜM santrallerin personeli karışırdı.
+    const personelSantralIdleri = req.query.santral_id ? [req.query.santral_id] : santralIdleri;
     const { rows: personel } = await req.db.query(
       `SELECT DISTINCT k.kullanici_id, k.ad_soyad, k.isletme_id
        FROM kullanici k
@@ -268,7 +272,7 @@ router.get("/filtre-secenekleri", requireRole(...RAPOR_ROLLERI), async (req, res
        AND k.rol IN ('SAHA_PERSONELI', 'SANTRAL_SORUMLUSU')
        AND k.aktif_mi = TRUE
        ORDER BY k.ad_soyad`,
-      [santralIdleri]
+      [personelSantralIdleri]
     );
 
     res.json({ santraller, personel });

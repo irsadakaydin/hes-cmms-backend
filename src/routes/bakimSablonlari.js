@@ -54,7 +54,7 @@ router.get("/", async (req, res, next) => {
   try {
     const { ekipman_tipi, isletme_id, santral_id, periyot_tipi, hepsi } = req.query;
     const params = [];
-    let sorgu = `SELECT bs.sablon_id, bs.ad, bs.ekipman_tipi, bs.periyot_tipi, bs.versiyon, bs.aktif_mi,
+    let sorgu = `SELECT bs.sablon_id, bs.ad, bs.ekipman_adi, bs.ekipman_tipi, bs.unite_no, bs.periyot_tipi, bs.versiyon, bs.aktif_mi,
                         bs.olusturma_tarihi, bs.isletme_id, i.ad AS isletme_adi,
                         bs.santral_id, s.ad AS santral_adi
                  FROM bakim_sablonu bs
@@ -124,6 +124,34 @@ router.get("/diger-holdingler", requireRole("ADMIN"), async (req, res, next) => 
       params
     );
     res.json({ veri: rows });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/v1/bakim-sablonlari/ekipman-tipleri?isletme_id=&santral_id= —
+// Şablon formunda "Ekipman Tipi"yi serbest yazı yerine açılır kutu yapmak
+// için, sistemde GERÇEKTEN KAYITLI olan ekipman tiplerini döner. Bu, yazım
+// hatası/farklı büyük-küçük harf yüzünden şablonun hiçbir ekipmanla
+// eşleşmemesi sorununu kökünden engeller.
+// NOT: "/:sablon_id" route'undan ÖNCE tanımlanmalı.
+router.get("/ekipman-tipleri", requireRole(...SABLON_YONETICI_ROLLERI), async (req, res, next) => {
+  try {
+    const hedefIsletmeId = platformAdminMi(req) ? req.query.isletme_id : req.user.isletme_id;
+    const params = [];
+    let kosul = "";
+    if (req.query.santral_id) {
+      params.push(req.query.santral_id);
+      kosul = `WHERE e.santral_id = $1`;
+    } else if (hedefIsletmeId) {
+      params.push(hedefIsletmeId);
+      kosul = `WHERE s.isletme_id = $1`;
+    }
+    const { rows } = await req.db.query(
+      `SELECT DISTINCT e.tip FROM ekipman e JOIN santral s ON s.santral_id = e.santral_id ${kosul} ORDER BY e.tip`,
+      params
+    );
+    res.json({ veri: rows.map((r) => r.tip) });
   } catch (err) {
     next(err);
   }
@@ -205,12 +233,14 @@ router.get("/:sablon_id/karekod-ekipmanlari", async (req, res, next) => {
         ? `SELECT e.ekipman_id, e.ad, e.unite_no, s.ad AS santral_adi
            FROM ekipman e JOIN santral s ON s.santral_id = e.santral_id
            WHERE e.santral_id = $1 AND e.tip = $2 AND e.durum = 'AKTIF'
+             AND ($3::text IS NULL OR e.unite_no = $3)
            ORDER BY e.ad`
         : `SELECT e.ekipman_id, e.ad, e.unite_no, s.ad AS santral_adi
            FROM ekipman e JOIN santral s ON s.santral_id = e.santral_id
            WHERE s.isletme_id = $1 AND e.tip = $2 AND e.durum = 'AKTIF'
+             AND ($3::text IS NULL OR e.unite_no = $3)
            ORDER BY s.ad, e.ad`,
-      [sablon.santral_id || sablon.isletme_id, sablon.ekipman_tipi]
+      [sablon.santral_id || sablon.isletme_id, sablon.ekipman_tipi, sablon.unite_no || null]
     );
 
     res.json({
@@ -309,7 +339,7 @@ router.get("/:sablon_id/karekod-pdf", async (req, res, next) => {
 // her zaman kendi holdingi için oluşturur.
 router.post("/", requireRole(...SABLON_YONETICI_ROLLERI), async (req, res, next) => {
   try {
-    const { ad, ekipman_tipi, periyot_tipi, checklist_json, santral_id } = req.body;
+    const { ad, ekipman_adi, ekipman_tipi, unite_no, periyot_tipi, checklist_json, santral_id } = req.body;
     if (!ad || !ekipman_tipi || !periyot_tipi || !checklist_json) {
       return res.status(400).json({
         hata_kodu: "EKSIK_ALAN",
@@ -336,10 +366,20 @@ router.post("/", requireRole(...SABLON_YONETICI_ROLLERI), async (req, res, next)
     }
 
     const { rows } = await req.db.query(
-      `INSERT INTO bakim_sablonu (ad, ekipman_tipi, periyot_tipi, checklist_json, olusturan_kullanici_id, isletme_id, santral_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `INSERT INTO bakim_sablonu (ad, ekipman_adi, ekipman_tipi, unite_no, periyot_tipi, checklist_json, olusturan_kullanici_id, isletme_id, santral_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        RETURNING *`,
-      [ad, ekipman_tipi, periyot_tipi, JSON.stringify(checklist_json), req.user.kullanici_id, hedefIsletmeId, santral_id || null]
+      [
+        ad,
+        ekipman_adi || null,
+        ekipman_tipi,
+        unite_no || null,
+        periyot_tipi,
+        JSON.stringify(checklist_json),
+        req.user.kullanici_id,
+        hedefIsletmeId,
+        santral_id || null,
+      ]
     );
     res.status(201).json(rows[0]);
   } catch (err) {
@@ -368,7 +408,9 @@ router.patch("/:sablon_id", requireRole(...SABLON_YONETICI_ROLLERI), async (req,
     }
 
     const ad = req.body.ad ?? eski.ad;
+    const ekipman_adi = req.body.ekipman_adi !== undefined ? req.body.ekipman_adi : eski.ekipman_adi;
     const ekipman_tipi = req.body.ekipman_tipi ?? eski.ekipman_tipi;
+    const unite_no = req.body.unite_no !== undefined ? req.body.unite_no : eski.unite_no;
     const periyot_tipi = req.body.periyot_tipi ?? eski.periyot_tipi;
     const santral_id = req.body.santral_id !== undefined ? req.body.santral_id : eski.santral_id;
     const checklist_json = req.body.checklist_json
@@ -379,10 +421,10 @@ router.patch("/:sablon_id", requireRole(...SABLON_YONETICI_ROLLERI), async (req,
     await req.db.query(`UPDATE bakim_sablonu SET aktif_mi = FALSE WHERE sablon_id = $1`, [eski.sablon_id]);
 
     const { rows: yeniRows } = await req.db.query(
-      `INSERT INTO bakim_sablonu (ad, ekipman_tipi, periyot_tipi, checklist_json, versiyon, olusturan_kullanici_id, isletme_id, santral_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      `INSERT INTO bakim_sablonu (ad, ekipman_adi, ekipman_tipi, unite_no, periyot_tipi, checklist_json, versiyon, olusturan_kullanici_id, isletme_id, santral_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
        RETURNING *`,
-      [ad, ekipman_tipi, periyot_tipi, checklist_json, eski.versiyon + 1, req.user.kullanici_id, eski.isletme_id, santral_id]
+      [ad, ekipman_adi, ekipman_tipi, unite_no, periyot_tipi, checklist_json, eski.versiyon + 1, req.user.kullanici_id, eski.isletme_id, santral_id]
     );
     await req.db.query("COMMIT");
 
@@ -652,8 +694,9 @@ router.post("/:sablon_id/oto-planla", requireRole(...SABLON_YONETICI_ROLLERI), a
               ) AS mukerrer
        FROM ekipman e
        JOIN santral s ON s.santral_id = e.santral_id
-       WHERE e.santral_id = ANY($1::uuid[]) AND e.tip = $2 AND e.durum = 'AKTIF'`,
-      [santralIdleri, sablon.ekipman_tipi, req.params.sablon_id]
+       WHERE e.santral_id = ANY($1::uuid[]) AND e.tip = $2 AND e.durum = 'AKTIF'
+         AND ($4::text IS NULL OR e.unite_no = $4)`,
+      [santralIdleri, sablon.ekipman_tipi, req.params.sablon_id, sablon.unite_no || null]
     );
 
     if (ekipmanRows.length === 0) {
