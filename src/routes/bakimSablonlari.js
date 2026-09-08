@@ -701,7 +701,9 @@ router.post("/:sablon_id/oto-planla", requireRole(...SABLON_YONETICI_ROLLERI), a
 
     if (ekipmanRows.length === 0) {
       return res.json({
-        mesaj: "Bu ekipman tipiyle eşleşen aktif ekipman bulunamadı.",
+        mesaj: `"${sablon.ad}" için eşleşen ekipman bulunamadı — sistemde "${sablon.ekipman_tipi}" tipinde${
+          sablon.unite_no ? ` ve Ünite No="${sablon.unite_no}" olan` : ""
+        } aktif bir ekipman kaydı yok. Şablonu düzenleyip "Ekipman Tipi" alanını, Ekipman Listesi'ndeki gerçek değerlerden yeniden seçin.`,
         olusturulan_sayisi: 0,
       });
     }
