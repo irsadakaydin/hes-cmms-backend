@@ -310,4 +310,41 @@ router.delete("/klasorler/:klasor_id", requireRole(...YONETICI_ROLLERI), async (
   }
 });
 
+// GET /api/v1/santraller/:santral_id/unite-sablonlari — bu santraldeki
+// TÜM "Ünite N" adlı düğümleri (Türbin, Generatör, HPU, vb. hangi ekipman
+// grubunun altında olursa olsun) ÜNİTE NUMARASINA göre birleştirip, her
+// numaranın altındaki TÜM şablonları tek listede döner. Yani "Ünite 1"
+// hem Türbin'in hem Generatör'ün hem HPU'nun Ünite 1'ini kapsar.
+router.get("/santraller/:santral_id/unite-sablonlari", async (req, res, next) => {
+  try {
+    if (!(await santralErisimVarMi(req, req.params.santral_id))) {
+      return res.status(403).json({ hata_kodu: "YETKI_YOK", mesaj: "Bu santrale erişim yetkiniz yok." });
+    }
+    const { rows } = await req.db.query(
+      `SELECT (regexp_match(u.ad, '\\d+'))[1]::int AS unite_no,
+              bs.sablon_id, bs.ad, bs.periyot_tipi
+       FROM ekipman_klasoru u
+       JOIN ekipman_klasoru yaprak ON yaprak.ust_klasor_id = u.klasor_id
+       JOIN bakim_sablonu bs ON bs.klasor_id = yaprak.klasor_id
+       WHERE u.santral_id = $1 AND u.ad ~* '^Ünite\\s*\\d+$' AND bs.aktif_mi = TRUE
+       ORDER BY unite_no, bs.ad`,
+      [req.params.santral_id]
+    );
+
+    const gruplar = {};
+    for (const r of rows) {
+      if (!gruplar[r.unite_no]) gruplar[r.unite_no] = [];
+      gruplar[r.unite_no].push({ sablon_id: r.sablon_id, ad: r.ad, periyot_tipi: r.periyot_tipi });
+    }
+    const veri = Object.keys(gruplar)
+      .map(Number)
+      .sort((a, b) => a - b)
+      .map((n) => ({ unite_no: n, ad: `Ünite ${n}`, sablonlar: gruplar[n] }));
+
+    res.json({ veri });
+  } catch (err) {
+    next(err);
+  }
+});
+
 module.exports = router;
