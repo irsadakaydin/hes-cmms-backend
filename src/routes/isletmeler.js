@@ -58,6 +58,14 @@ router.post("/", requireRole("ADMIN"), async (req, res, next) => {
     });
   }
 
+  if (!/^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/.test(alan_adi)) {
+    return res.status(400).json({
+      hata_kodu: "GECERSIZ_ALAN_ADI",
+      mesaj:
+        "Alan adı yalnızca küçük harf (a-z), rakam ve tire (-) içerebilir; boşluk, büyük harf veya Türkçe karakter (ç,ğ,ı,ö,ş,ü) kullanılamaz. Örnek: aydem-enerji",
+    });
+  }
+
   try {
     await req.db.query("BEGIN");
 
@@ -113,6 +121,13 @@ router.patch("/:isletme_id", requireRole("ADMIN"), async (req, res, next) => {
     const guncellenecekler = Object.keys(req.body).filter((k) => izinliAlanlar.includes(k));
     if (guncellenecekler.length === 0) {
       return res.status(400).json({ hata_kodu: "EKSIK_ALAN", mesaj: "Güncellenecek en az bir alan gönderilmeli." });
+    }
+    if (req.body.alan_adi !== undefined && !/^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/.test(req.body.alan_adi)) {
+      return res.status(400).json({
+        hata_kodu: "GECERSIZ_ALAN_ADI",
+        mesaj:
+          "Alan adı yalnızca küçük harf (a-z), rakam ve tire (-) içerebilir; boşluk, büyük harf veya Türkçe karakter kullanılamaz.",
+      });
     }
 
     const setIfadesi = guncellenecekler.map((alan, i) => `${alan} = $${i + 1}`).join(", ");
