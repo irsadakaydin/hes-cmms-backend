@@ -79,7 +79,7 @@ router.get("/klasorler/:klasor_id/yol", async (req, res, next) => {
 router.get("/klasorler/:klasor_id/ekipmanlar", async (req, res, next) => {
   try {
     const { rows } = await req.db.query(
-      `SELECT ekipman_id, ad, tip, unite_no, durum FROM ekipman WHERE klasor_id = $1 AND durum = 'AKTIF' ORDER BY ad`,
+      `SELECT ekipman_id, ad, tip, unite_no, durum, klasor_id FROM ekipman WHERE klasor_id = $1 ORDER BY ad`,
       [req.params.klasor_id]
     );
     res.json({ veri: rows });
