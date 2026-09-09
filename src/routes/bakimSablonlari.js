@@ -524,12 +524,14 @@ router.post("/:sablon_id/kopyala", requireRole("ADMIN"), async (req, res, next) 
     }
 
     const { rows } = await req.db.query(
-      `INSERT INTO bakim_sablonu (ad, ekipman_tipi, periyot_tipi, checklist_json, olusturan_kullanici_id, isletme_id, santral_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `INSERT INTO bakim_sablonu (ad, ekipman_adi, ekipman_tipi, unite_no, periyot_tipi, checklist_json, olusturan_kullanici_id, isletme_id, santral_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        RETURNING *`,
       [
         yeniAd,
+        kaynak.ekipman_adi,
         kaynak.ekipman_tipi,
+        kaynak.unite_no,
         kaynak.periyot_tipi,
         JSON.stringify(kaynak.checklist_json),
         req.user.kullanici_id,
