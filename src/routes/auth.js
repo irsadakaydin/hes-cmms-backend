@@ -10,7 +10,7 @@ const router = express.Router();
 // POST /api/v1/auth/login
 router.post("/login", async (req, res, next) => {
   try {
-    const { eposta, sifre } = req.body;
+    const { eposta, sifre, isletme_id } = req.body;
     if (!eposta || !sifre) {
       return res.status(400).json({
         hata_kodu: "EKSIK_ALAN",
@@ -18,39 +18,46 @@ router.post("/login", async (req, res, next) => {
       });
     }
 
+    // Aynı e-posta artık farklı holdinglerde AYRI birer hesaba ait
+    // olabilir — bu yüzden önce eşleşen TÜM hesapları çekiyoruz.
+    // isletme_id verilmişse (önceki "birden fazla hesap" adımından sonra
+    // seçim yapıldıysa) doğrudan o hesaba daraltıyoruz.
     const { rows } = await pool.query(
       `SELECT k.kullanici_id, k.isletme_id, k.ad_soyad, k.eposta, k.sifre_hash, k.rol, k.aktif_mi,
-              i.durum AS isletme_durum
+              i.durum AS isletme_durum, i.ad AS isletme_adi
        FROM kullanici k
        LEFT JOIN isletme i ON i.isletme_id = k.isletme_id
-       WHERE k.eposta = $1`,
-      [eposta]
+       WHERE k.eposta = $1 AND k.aktif_mi = TRUE
+         AND ($2::uuid IS NULL OR k.isletme_id = $2)`,
+      [eposta, isletme_id || null]
     );
 
-    const kullanici = rows[0];
-    if (!kullanici || !kullanici.aktif_mi) {
+    // Yalnızca holdingi aktif olan (ya da Platform Admin) hesapları, ve
+    // şifresi doğru olanları aday olarak bırak.
+    const adaylar = [];
+    for (const k of rows) {
+      if (k.rol !== "ADMIN" && k.isletme_durum === "PASIF") continue;
+      if (await bcrypt.compare(sifre, k.sifre_hash)) adaylar.push(k);
+    }
+
+    if (adaylar.length === 0) {
       return res.status(401).json({
         hata_kodu: "GIRIS_BASARISIZ",
         mesaj: "E-posta veya şifre hatalı, ya da hesap pasif.",
       });
     }
 
-    // Platform Admin (rol=ADMIN) her zaman giriş yapabilir — bir holdinge
-    // bağlı olsa bile o holdingin durumu Platform Admin'i etkilemez.
-    if (kullanici.rol !== "ADMIN" && kullanici.isletme_durum === "PASIF") {
-      return res.status(401).json({
-        hata_kodu: "GIRIS_BASARISIZ",
-        mesaj: "Bağlı olduğunuz holding pasifleştirilmiş, giriş yapamazsınız.",
+    if (adaylar.length > 1) {
+      // Aynı e-posta/şifre birden fazla holdingde geçerli — hangi hesapla
+      // giriş yapılacağını netleştirmek üzere seçim listesi döndür.
+      return res.status(300).json({
+        hata_kodu: "BIRDEN_FAZLA_HESAP",
+        mesaj: "Bu e-posta birden fazla holdingde kayıtlı. Giriş yapmak istediğiniz holdingi seçin.",
+        hesaplar: adaylar.map((k) => ({ isletme_id: k.isletme_id, isletme_adi: k.isletme_adi })),
       });
     }
 
-    const sifreDogru = await bcrypt.compare(sifre, kullanici.sifre_hash);
-    if (!sifreDogru) {
-      return res.status(401).json({
-        hata_kodu: "GIRIS_BASARISIZ",
-        mesaj: "E-posta veya şifre hatalı.",
-      });
-    }
+    const kullanici = adaylar[0];
 
     const token = jwt.sign(
       {
