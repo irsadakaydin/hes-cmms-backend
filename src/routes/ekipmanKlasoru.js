@@ -310,36 +310,41 @@ router.delete("/klasorler/:klasor_id", requireRole(...YONETICI_ROLLERI), async (
   }
 });
 
-// GET /api/v1/santraller/:santral_id/unite-sablonlari — bu santraldeki
-// TÜM "Ünite N" adlı düğümleri (Türbin, Generatör, HPU, vb. hangi ekipman
-// grubunun altında olursa olsun) ÜNİTE NUMARASINA göre birleştirip, her
-// numaranın altındaki TÜM şablonları tek listede döner. Yani "Ünite 1"
-// hem Türbin'in hem Generatör'ün hem HPU'nun Ünite 1'ini kapsar.
+// GET /api/v1/santraller/:santral_id/unite-sablonlari — bu santraldeki TÜM
+// "ekipman düğümlerini" (altında en az bir periyot yaprağı olan her düğüm —
+// standart HES ağacında "Ünite N", özel ağaçlarda "Hat 1"/"Fabrika" gibi
+// herhangi bir isim olabilir) bulup AYNI İSİMDEKİLERİ birleştirir (ör.
+// Türbin'in "Ünite 1"i ile Generatör'ün "Ünite 1"i birlikte gösterilir),
+// farklı isimdeki düğümler (ör. "Hat 1") kendi başına listelenir.
 router.get("/santraller/:santral_id/unite-sablonlari", async (req, res, next) => {
   try {
     if (!(await santralErisimVarMi(req, req.params.santral_id))) {
       return res.status(403).json({ hata_kodu: "YETKI_YOK", mesaj: "Bu santrale erişim yetkiniz yok." });
     }
     const { rows } = await req.db.query(
-      `SELECT (regexp_match(u.ad, '\\d+'))[1]::int AS unite_no,
+      `SELECT u.ad AS unite_adi, u.sira,
               bs.sablon_id, bs.ad, bs.periyot_tipi
        FROM ekipman_klasoru u
        JOIN ekipman_klasoru yaprak ON yaprak.ust_klasor_id = u.klasor_id
        JOIN bakim_sablonu bs ON bs.klasor_id = yaprak.klasor_id
-       WHERE u.santral_id = $1 AND u.ad ~* '^Ünite\\s*\\d+$' AND bs.aktif_mi = TRUE
-       ORDER BY unite_no, bs.ad`,
+       WHERE u.santral_id = $1
+         AND u.periyot_tipi IS NULL
+         AND EXISTS (
+           SELECT 1 FROM ekipman_klasoru p WHERE p.ust_klasor_id = u.klasor_id AND p.periyot_tipi IS NOT NULL
+         )
+         AND bs.aktif_mi = TRUE
+       ORDER BY u.sira, u.ad, bs.ad`,
       [req.params.santral_id]
     );
 
-    const gruplar = {};
+    const gruplar = new Map();
     for (const r of rows) {
-      if (!gruplar[r.unite_no]) gruplar[r.unite_no] = [];
-      gruplar[r.unite_no].push({ sablon_id: r.sablon_id, ad: r.ad, periyot_tipi: r.periyot_tipi });
+      if (!gruplar.has(r.unite_adi)) gruplar.set(r.unite_adi, { sira: r.sira, sablonlar: [] });
+      gruplar.get(r.unite_adi).sablonlar.push({ sablon_id: r.sablon_id, ad: r.ad, periyot_tipi: r.periyot_tipi });
     }
-    const veri = Object.keys(gruplar)
-      .map(Number)
-      .sort((a, b) => a - b)
-      .map((n) => ({ unite_no: n, ad: `Ünite ${n}`, sablonlar: gruplar[n] }));
+    const veri = [...gruplar.entries()]
+      .sort((a, b) => a[1].sira - b[1].sira || a[0].localeCompare(b[0]))
+      .map(([ad, v]) => ({ ad, sablonlar: v.sablonlar }));
 
     res.json({ veri });
   } catch (err) {
