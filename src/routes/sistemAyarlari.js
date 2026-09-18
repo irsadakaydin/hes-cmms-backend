@@ -1,13 +1,17 @@
 const express = require("express");
 const { requireAuth, requireRole } = require("../middleware/auth");
 const { withDbContext } = require("../middleware/dbContext");
-const pool = require("../db");
+// NOT: db.js muhtemelen pool'u { pool } şeklinde adlandırılmış bir dışa
+// aktarım olarak veriyor (doğrudan "module.exports = pool" değil) —
+// "pool.query is not a function" hatası tam olarak bunu gösteriyor.
+const { pool } = require("../db");
 
 const router = express.Router();
 
 // GET /api/v1/sistem-ayarlari/arkaplan — GİRİŞ SAYFASI DA DAHİL herkes
 // tarafından okunabilmeli (oturum açmadan önce de arka plan gösterilir),
-// bu yüzden requireAuth UYGULANMIYOR — kasıtlı olarak.
+// bu yüzden requireAuth/withDbContext UYGULANMIYOR — doğrudan havuzu
+// (pool) kullanıyoruz.
 router.get("/sistem-ayarlari/arkaplan", async (req, res, next) => {
   try {
     const { rows } = await pool.query(
