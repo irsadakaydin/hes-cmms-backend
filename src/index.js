@@ -18,6 +18,7 @@ const raporRoutes = require("./routes/raporlar");
 const mesajRoutes = require("./routes/mesajlar");
 const girisLoglariRoutes = require("./routes/girisLoglari");
 const sistemAyarlariRoutes = require("./routes/sistemAyarlari");
+const depoRoutes = require("./routes/depo");
 
 const app = express();
 
@@ -104,6 +105,7 @@ app.use("/api/v1", bakimPlanRoutes);
 app.use("/api/v1", kullaniciRoutes);
 app.use("/api/v1", bildirimRoutes);
 app.use("/api/v1", sistemAyarlariRoutes);
+app.use("/api/v1", depoRoutes);
 
 // 404 — tanımsız rota
 app.use((req, res) => {
