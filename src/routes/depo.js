@@ -2,6 +2,11 @@ const express = require("express");
 const PDFDocument = require("pdfkit");
 const { requireAuth, requireRole } = require("../middleware/auth");
 const { withDbContext } = require("../middleware/dbContext");
+// Çoklu sorgulu transaction'lar (BEGIN/COMMIT/ROLLBACK) için TEK BİR
+// bağlantı (client) gerekiyor — bu yüzden pool'u doğrudan içe aktarıp
+// pool.connect() ile özel bir client alıyoruz (bkz. Malzeme Giriş ve
+// Çıkış Onaylama route'ları).
+const { pool } = require("../db");
 
 const router = express.Router();
 router.use(requireAuth, withDbContext);
@@ -93,6 +98,7 @@ router.post(
   "/santraller/:santral_id/depo/giris",
   requireRole(...GIRIS_ROLLERI),
   async (req, res, next) => {
+    let client;
     try {
       if (await erisimYoksaReddet(req, res, req.params.santral_id)) return;
 
@@ -107,18 +113,25 @@ router.post(
         return res.status(400).json({ hata_kodu: "GECERSIZ_MIKTAR", mesaj: "Miktar sıfırdan büyük olmalıdır." });
       }
 
-      await req.db.query("BEGIN");
+      // ÖNEMLİ: BEGIN/COMMIT/ROLLBACK'in aynı bağlantı üzerinde çalışması
+      // ZORUNLU — paylaşılan pool.query() her çağrıda FARKLI bir bağlantı
+      // kullanabileceği için (önceki sürümdeki hata buydu ve isteğin
+      // sonsuza kadar asılı kalmasına yol açıyordu), burada tek bir
+      // client (pool.connect()) alıp TÜM sorguları onun üzerinden
+      // yürütüyoruz.
+      client = await pool.connect();
+      await client.query("BEGIN");
       try {
         // Malzeme bu santralde daha önce tanımlanmışsa üzerine ekle, yoksa
         // yeni oluştur.
-        const { rows: mevcutRows } = await req.db.query(
+        const { rows: mevcutRows } = await client.query(
           `SELECT * FROM depo_malzeme WHERE santral_id = $1 AND sku = $2 FOR UPDATE`,
           [req.params.santral_id, sku]
         );
 
         let malzeme;
         if (mevcutRows[0]) {
-          const { rows } = await req.db.query(
+          const { rows } = await client.query(
             `UPDATE depo_malzeme
              SET mevcut_miktar = mevcut_miktar + $1,
                  ad = $2,
@@ -132,7 +145,7 @@ router.post(
           );
           malzeme = rows[0];
         } else {
-          const { rows } = await req.db.query(
+          const { rows } = await client.query(
             `INSERT INTO depo_malzeme (santral_id, sku, ad, barkod, birim, mevcut_miktar, kritik_stok_miktari, konum)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
              RETURNING *`,
@@ -141,24 +154,26 @@ router.post(
           malzeme = rows[0];
         }
 
-        const { rows: siraRows } = await req.db.query(`SELECT nextval('depo_giris_fis_sira') AS n`);
+        const { rows: siraRows } = await client.query(`SELECT nextval('depo_giris_fis_sira') AS n`);
         const fisNo = `G-${String(siraRows[0].n).padStart(6, "0")}`;
 
-        const { rows: girisRows } = await req.db.query(
+        const { rows: girisRows } = await client.query(
           `INSERT INTO depo_giris (fis_no, santral_id, malzeme_id, teslim_alan_kullanici_id, miktar, olusturan_kullanici_id)
            VALUES ($1, $2, $3, $4, $5, $6)
            RETURNING *`,
           [fisNo, req.params.santral_id, malzeme.malzeme_id, req.user.kullanici_id, miktar, req.user.kullanici_id]
         );
 
-        await req.db.query("COMMIT");
+        await client.query("COMMIT");
         res.status(201).json({ giris: girisRows[0], malzeme });
       } catch (icErr) {
-        await req.db.query("ROLLBACK");
+        await client.query("ROLLBACK");
         throw icErr;
       }
     } catch (err) {
       next(err);
+    } finally {
+      if (client) client.release();
     }
   }
 );
@@ -230,12 +245,14 @@ router.post(
   "/santraller/:santral_id/depo/cikis/:cikis_id/onayla",
   requireRole(...CIKIS_ONAY_ROLLERI),
   async (req, res, next) => {
+    let client;
     try {
       if (await erisimYoksaReddet(req, res, req.params.santral_id)) return;
 
-      await req.db.query("BEGIN");
+      client = await pool.connect();
+      await client.query("BEGIN");
       try {
-        const { rows: talepRows } = await req.db.query(
+        const { rows: talepRows } = await client.query(
           `SELECT c.*, m.mevcut_miktar, m.ad AS malzeme_adi, m.birim
            FROM depo_cikis c JOIN depo_malzeme m ON m.malzeme_id = c.malzeme_id
            WHERE c.cikis_id = $1 AND c.santral_id = $2 AND c.durum = 'BEKLIYOR' FOR UPDATE`,
@@ -243,29 +260,29 @@ router.post(
         );
         const talep = talepRows[0];
         if (!talep) {
-          await req.db.query("ROLLBACK");
+          await client.query("ROLLBACK");
           return res.status(404).json({
             hata_kodu: "TALEP_BULUNAMADI",
             mesaj: "Bekleyen bir çıkış talebi bulunamadı (zaten onaylanmış/reddedilmiş olabilir).",
           });
         }
         if (Number(talep.mevcut_miktar) < Number(talep.miktar)) {
-          await req.db.query("ROLLBACK");
+          await client.query("ROLLBACK");
           return res.status(400).json({
             hata_kodu: "YETERSIZ_STOK",
             mesaj: `Depoda yeterli "${talep.malzeme_adi}" yok (mevcut: ${talep.mevcut_miktar} ${talep.birim}, talep: ${talep.miktar} ${talep.birim}).`,
           });
         }
 
-        const { rows: siraRows } = await req.db.query(`SELECT nextval('depo_cikis_fis_sira') AS n`);
+        const { rows: siraRows } = await client.query(`SELECT nextval('depo_cikis_fis_sira') AS n`);
         const fisNo = `C-${String(siraRows[0].n).padStart(6, "0")}`;
 
-        const { rows: malzemeRows } = await req.db.query(
+        const { rows: malzemeRows } = await client.query(
           `UPDATE depo_malzeme SET mevcut_miktar = mevcut_miktar - $1 WHERE malzeme_id = $2 RETURNING *`,
           [talep.miktar, talep.malzeme_id]
         );
 
-        const { rows: guncelCikis } = await req.db.query(
+        const { rows: guncelCikis } = await client.query(
           `UPDATE depo_cikis
            SET durum = 'ONAYLANDI', onaylayan_kullanici_id = $1, cikis_tarihi = now(), fis_no = $2
            WHERE cikis_id = $3
@@ -273,15 +290,17 @@ router.post(
           [req.user.kullanici_id, fisNo, req.params.cikis_id]
         );
 
-        await req.db.query("COMMIT");
+        await client.query("COMMIT");
         await kritikStokUyarisiGonder(req, malzemeRows[0]);
         res.json(guncelCikis[0]);
       } catch (icErr) {
-        await req.db.query("ROLLBACK");
+        await client.query("ROLLBACK");
         throw icErr;
       }
     } catch (err) {
       next(err);
+    } finally {
+      if (client) client.release();
     }
   }
 );
