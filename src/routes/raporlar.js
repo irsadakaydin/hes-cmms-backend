@@ -2,6 +2,7 @@ const express = require("express");
 const path = require("path");
 const PDFDocument = require("pdfkit");
 const ExcelJS = require("exceljs");
+const archiver = require("archiver");
 const { requireAuth, requireRole } = require("../middleware/auth");
 const { withDbContext } = require("../middleware/dbContext");
 
@@ -498,8 +499,6 @@ router.get("/ozet-banner", requireRole(...RAPOR_ROLLERI), async (req, res, next)
     // uygulanır; GECIKEN/DURDURULAN her zaman sayılır. Bakımlar sayfasındaki
     // mantıkla birebir aynı.
     const filtreli = planlar.filter((p) => {
-      // Yalnızca TAMAMLANAN bir tarih aralığına göre süzülür — DEVAM_EDEN,
-      // GECİKEN ve DURDURULAN tarihten bağımsız GÜNCEL bir durumdur.
       if (p.kategori !== "TAMAMLANAN") return true;
       if (!req.query.baslangic && !req.query.bitis) return true;
       if (!p.son_donem_tarihi) return true;
@@ -689,11 +688,6 @@ router.get("/santral/:santral_id/pdf", requireRole(...RAPOR_ROLLERI), async (req
 
     const dokuman = new PDFDocument({ size: "A4", margin: 40, layout: "landscape" });
 
-    // İstemci PDF akışı tamamlanmadan bağlantıyı keserse (ör. tarayıcı
-    // isteği iptal eder, sekme kapanır), pdfkit yine de akışa yazmaya
-    // devam edebilir ve bu "write after end" hatası yakalanmazsa TÜM
-    // Node.js sürecini çökertir. Bu iki dinleyici, hatayı sessizce
-    // loglayıp sürecin ayakta kalmasını sağlar.
     res.on("error", (err) => {
       console.error("Rapor akışı hatası (istemci muhtemelen bağlantıyı kesti):", err.message);
     });
@@ -705,7 +699,6 @@ router.get("/santral/:santral_id/pdf", requireRole(...RAPOR_ROLLERI), async (req
     dokuman.registerFont("DejaVu", FONT_NORMAL);
     dokuman.registerFont("DejaVu-Bold", FONT_KALIN);
 
-    // Başlık
     dokuman.font("DejaVu-Bold").fontSize(16).fillColor("#0f3d3e").text("HES Bakım Yönetim Sistemi");
     dokuman
       .font("DejaVu-Bold")
@@ -728,7 +721,6 @@ router.get("/santral/:santral_id/pdf", requireRole(...RAPOR_ROLLERI), async (req
     dokuman.strokeColor("#c17a24").lineWidth(1.5).moveTo(40, dokuman.y).lineTo(802, dokuman.y).stroke();
     dokuman.moveDown(0.6);
 
-    // Özet satırı
     dokuman
       .font("DejaVu")
       .fontSize(9)
@@ -738,7 +730,6 @@ router.get("/santral/:santral_id/pdf", requireRole(...RAPOR_ROLLERI), async (req
       );
     dokuman.moveDown(0.8);
 
-    // Tablo
     const sutunlar = [
       { baslik: "İşletme", genislik: 95 },
       { baslik: "Bakım Adı", genislik: 285 },
@@ -792,7 +783,6 @@ router.get("/santral/:santral_id/pdf", requireRole(...RAPOR_ROLLERI), async (req
       y += SATIR_YUKSEKLIGI;
     }
 
-    // Onay/imza alanları
     y += 30;
     if (y > 540) {
       dokuman.addPage({ size: "A4", layout: "landscape", margin: 40 });
@@ -898,7 +888,165 @@ router.get("/santral/:santral_id/excel", requireRole(...RAPOR_ROLLERI), async (r
 // Rapor Oluştur sayfasındaki "PDF Çıktı Al" özelliği için: tek bir
 // tamamlanmış görevin checklist formunu (soru+cevap, not, imza, fotoğraf)
 // ekrandaki hâline sadık kalarak PDF olarak üretir.
+//
+// gorevDetayIcinVeriCek + gorevDetayPdfBufferUret ikilisi, hem TEKİL PDF
+// indirme uç noktası (gorev-detay-pdf/:gorev_id) hem de TOPLU ZIP indirme
+// uç noktası (tamamlanan-gorevler/zip) tarafından ORTAK kullanılır —
+// böylece iki PDF birbirinden farklılaşmaz.
 // ---------------------------------------------------------------------
+
+async function gorevDetayIcinVeriCek(req, gorev_id) {
+  const { rows } = await req.db.query(
+    `SELECT g.gorev_id, g.planlanan_tarih,
+            bk.checklist_sonuclari, bk.notlar, bk.fotograflar, bk.imza_url, bk.tamamlanma_tarihi,
+            s.santral_id, s.ad AS santral_adi, i.ad AS isletme_adi,
+            e.ad AS ekipman_adi,
+            bs.ad AS bakim_adi, bs.checklist_json,
+            k.ad_soyad AS tamamlayan_adi
+     FROM bakim_gorevi g
+     JOIN bakim_kaydi bk    ON bk.gorev_id = g.gorev_id
+     JOIN bakim_plani bp    ON bp.plan_id = g.plan_id
+     JOIN santral s         ON s.santral_id = bp.santral_id
+     JOIN isletme i         ON i.isletme_id = s.isletme_id
+     JOIN ekipman e         ON e.ekipman_id = bp.ekipman_id
+     JOIN bakim_sablonu bs  ON bs.sablon_id = bp.sablon_id
+     JOIN kullanici k       ON k.kullanici_id = bk.tamamlayan_kullanici_id
+     WHERE g.gorev_id = $1`,
+    [gorev_id]
+  );
+  return rows[0] || null;
+}
+
+/** Bir görsel kaynağını (base64 data URL ya da http(s) URL) pdfkit'e
+ * verilebilecek bir Buffer'a çevirir. Supabase Storage'a yüklenmiş
+ * fotoğraf/imzalar http(s) URL, yapılandırılmamışsa base64 data URL olur. */
+async function gorseleGetir(kaynak) {
+  if (!kaynak) return null;
+  if (kaynak.startsWith("data:")) {
+    const eslesme = kaynak.match(/^data:image\/\w+;base64,(.+)$/);
+    if (!eslesme) return null;
+    return Buffer.from(eslesme[1], "base64");
+  }
+  try {
+    const yanit = await fetch(kaynak);
+    if (!yanit.ok) return null;
+    const arrayBuffer = await yanit.arrayBuffer();
+    return Buffer.from(arrayBuffer);
+  } catch {
+    return null;
+  }
+}
+
+/** Tek bir tamamlanmış görevin "Bakım Formu" PDF'ini bir Buffer olarak
+ * üretir (diske ya da res'e YAZMAZ — çağıran taraf bunu ister doğrudan
+ * indirtir, ister bir ZIP arşivine ekler). */
+async function gorevDetayPdfBufferUret(kayit) {
+  return new Promise((resolve, reject) => {
+    const dokuman = new PDFDocument({ size: "A4", margin: 45 });
+    const parcalar = [];
+    dokuman.on("data", (parca) => parcalar.push(parca));
+    dokuman.on("end", () => resolve(Buffer.concat(parcalar)));
+    dokuman.on("error", reject);
+
+    dokuman.registerFont("DejaVu", FONT_NORMAL);
+    dokuman.registerFont("DejaVu-Bold", FONT_KALIN);
+
+    const genislik = 505; // A4 - 2*45 kenar boşluğu
+
+    (async () => {
+      try {
+        dokuman.font("DejaVu-Bold").fontSize(15).fillColor("#0f3d3e").text(kayit.bakim_adi.toUpperCase());
+        dokuman
+          .font("DejaVu")
+          .fontSize(10)
+          .fillColor("#5b6b62")
+          .text(`${kayit.isletme_adi} — ${kayit.santral_adi} — ${kayit.ekipman_adi}`);
+        dokuman.moveDown(0.6);
+        dokuman.strokeColor("#c17a24").lineWidth(1.5).moveTo(45, dokuman.y).lineTo(45 + genislik, dokuman.y).stroke();
+        dokuman.moveDown(0.8);
+
+        const kalemler = kayit.checklist_json?.kalemler || [];
+        const cevaplar = kayit.checklist_sonuclari || {};
+
+        kalemler.forEach((kalem) => {
+          if (dokuman.y > 720) dokuman.addPage({ size: "A4", margin: 45 });
+          const cevap = cevaplar[kalem.id]?.deger;
+
+          dokuman.font("DejaVu-Bold").fontSize(10.5).fillColor("#13201c").text(kalem.soru, 45, dokuman.y, {
+            width: genislik,
+          });
+          dokuman.moveDown(0.15);
+
+          let cevapMetni = "—";
+          let renk = "#5b6b62";
+          if (kalem.tip === "evet_hayir") {
+            cevapMetni = cevap === true ? "✓ Evet" : cevap === false ? "✗ Hayır" : "—";
+            renk = cevap === true ? "#2c7a4b" : cevap === false ? "#a83b2e" : "#5b6b62";
+          } else if (kalem.tip === "olcum") {
+            cevapMetni = cevap !== undefined && cevap !== "" ? `${cevap}${kalem.birim ? " " + kalem.birim : ""}` : "—";
+          } else {
+            cevapMetni = cevap || "—";
+          }
+          dokuman.font("DejaVu-Bold").fontSize(10).fillColor(renk).text(cevapMetni, 45, dokuman.y, { width: genislik });
+          dokuman.moveDown(0.6);
+        });
+
+        dokuman.moveDown(0.3);
+        dokuman.font("DejaVu-Bold").fontSize(10.5).fillColor("#13201c").text("Genel not");
+        dokuman.font("DejaVu").fontSize(10).fillColor("#5b6b62").text(kayit.notlar || "—", { width: genislik });
+        dokuman.moveDown(0.8);
+
+        if (kayit.fotograflar && kayit.fotograflar.length > 0) {
+          dokuman.font("DejaVu-Bold").fontSize(10.5).fillColor("#13201c").text(`Fotoğraflar (${kayit.fotograflar.length})`);
+          dokuman.moveDown(0.3);
+          let x = 45;
+          const fotoGenislik = 110;
+          for (const foto of kayit.fotograflar) {
+            const buffer = await gorseleGetir(foto).catch(() => null);
+            if (buffer) {
+              if (x + fotoGenislik > 45 + genislik) {
+                x = 45;
+                dokuman.moveDown(0.5);
+              }
+              try {
+                dokuman.image(buffer, x, dokuman.y, { width: fotoGenislik });
+              } catch {
+                // bozuk görsel verisi — sessizce atla
+              }
+              x += fotoGenislik + 10;
+            }
+          }
+          dokuman.moveDown(9);
+        }
+
+        if (dokuman.y > 620) dokuman.addPage({ size: "A4", margin: 45 });
+        dokuman.font("DejaVu-Bold").fontSize(10.5).fillColor("#13201c").text("Onay — İmza");
+        dokuman.moveDown(0.3);
+        const imzaBuffer = await gorseleGetir(kayit.imza_url).catch(() => null);
+        if (imzaBuffer) {
+          try {
+            dokuman.image(imzaBuffer, 45, dokuman.y, { width: 200, height: 90, fit: [200, 90] });
+            dokuman.moveDown(6.5);
+          } catch {
+            dokuman.font("DejaVu").fontSize(9).fillColor("#5b6b62").text("(imza görüntülenemedi)");
+          }
+        }
+
+        dokuman
+          .font("DejaVu")
+          .fontSize(9)
+          .fillColor("#5b6b62")
+          .text(
+            `Tamamlayan: ${kayit.tamamlayan_adi}   |   Tamamlanma tarihi: ${tarihFormatla(kayit.tamamlanma_tarihi)}`
+          );
+
+        dokuman.end();
+      } catch (err) {
+        reject(err);
+      }
+    })();
+  });
+}
 
 // GET /api/v1/raporlar/tamamlanan-gorevler?baslangic=&bitis=&santral_id=&isletme_id=
 // Seçim listesini doldurur — tarih aralığındaki TAMAMLANDI görevleri listeler.
@@ -949,26 +1097,6 @@ router.get("/tamamlanan-gorevler", requireRole(...RAPOR_ROLLERI), async (req, re
   }
 });
 
-/** Bir görsel kaynağını (base64 data URL ya da http(s) URL) pdfkit'e
- * verilebilecek bir Buffer'a çevirir. Supabase Storage'a yüklenmiş
- * fotoğraf/imzalar http(s) URL, yapılandırılmamışsa base64 data URL olur. */
-async function gorseleGetir(kaynak) {
-  if (!kaynak) return null;
-  if (kaynak.startsWith("data:")) {
-    const eslesme = kaynak.match(/^data:image\/\w+;base64,(.+)$/);
-    if (!eslesme) return null;
-    return Buffer.from(eslesme[1], "base64");
-  }
-  try {
-    const yanit = await fetch(kaynak);
-    if (!yanit.ok) return null;
-    const arrayBuffer = await yanit.arrayBuffer();
-    return Buffer.from(arrayBuffer);
-  } catch {
-    return null;
-  }
-}
-
 /** HTTP header değerleri yalnızca ISO-8859-1/ASCII karakter kabul eder;
  * Türkçe ı/ş/ğ/İ gibi karakterler Content-Disposition'da "Invalid character
  * in header content" hatasına yol açar. ASCII'ye sadeleştirilmiş bir yedek
@@ -994,25 +1122,7 @@ function contentDispositionOlustur(orijinalAd) {
 // GET /api/v1/raporlar/gorev-detay-pdf/:gorev_id
 router.get("/gorev-detay-pdf/:gorev_id", requireRole(...RAPOR_ROLLERI), async (req, res, next) => {
   try {
-    const { rows } = await req.db.query(
-      `SELECT g.gorev_id, g.planlanan_tarih,
-              bk.checklist_sonuclari, bk.notlar, bk.fotograflar, bk.imza_url, bk.tamamlanma_tarihi,
-              s.santral_id, s.ad AS santral_adi, i.ad AS isletme_adi,
-              e.ad AS ekipman_adi,
-              bs.ad AS bakim_adi, bs.checklist_json,
-              k.ad_soyad AS tamamlayan_adi
-       FROM bakim_gorevi g
-       JOIN bakim_kaydi bk    ON bk.gorev_id = g.gorev_id
-       JOIN bakim_plani bp    ON bp.plan_id = g.plan_id
-       JOIN santral s         ON s.santral_id = bp.santral_id
-       JOIN isletme i         ON i.isletme_id = s.isletme_id
-       JOIN ekipman e         ON e.ekipman_id = bp.ekipman_id
-       JOIN bakim_sablonu bs  ON bs.sablon_id = bp.sablon_id
-       JOIN kullanici k       ON k.kullanici_id = bk.tamamlayan_kullanici_id
-       WHERE g.gorev_id = $1`,
-      [req.params.gorev_id]
-    );
-    const kayit = rows[0];
+    const kayit = await gorevDetayIcinVeriCek(req, req.params.gorev_id);
     if (!kayit) {
       return res.status(404).json({ hata_kodu: "GOREV_BULUNAMADI", mesaj: "Görev ya da bakım kaydı bulunamadı." });
     }
@@ -1020,109 +1130,104 @@ router.get("/gorev-detay-pdf/:gorev_id", requireRole(...RAPOR_ROLLERI), async (r
       return res.status(403).json({ hata_kodu: "YETKI_YOK", mesaj: "Bu göreve erişim yetkiniz yok." });
     }
 
+    const buffer = await gorevDetayPdfBufferUret(kayit);
+
     res.setHeader("Content-Type", "application/pdf");
-    res.setHeader(
-      "Content-Disposition",
-      contentDispositionOlustur(`bakim-formu-${kayit.ekipman_adi}.pdf`)
+    res.setHeader("Content-Disposition", contentDispositionOlustur(`bakim-formu-${kayit.ekipman_adi}.pdf`));
+    res.end(buffer);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/v1/raporlar/tamamlanan-gorevler/zip?baslangic=&bitis=&santral_id=&isletme_id=
+// Seçilen tarih aralığındaki TÜM tamamlanmış görevlerin "Bakım Formu"
+// PDF'lerini TEK BİR ZIP arşivinde toplu indirir. Her PDF, tekil indirme
+// (gorev-detay-pdf) ile BİREBİR AYNI üretim mantığını kullanır.
+router.get("/tamamlanan-gorevler/zip", requireRole(...RAPOR_ROLLERI), async (req, res, next) => {
+  try {
+    const santralIdleri = await erisilenSantralIdleri(req);
+    if (santralIdleri.length === 0) {
+      return res.status(404).json({ hata_kodu: "KAYIT_YOK", mesaj: "Erişebildiğiniz bir santral bulunamadı." });
+    }
+
+    const params = [santralIdleri];
+    let ekKosul = "";
+    if (req.query.santral_id) {
+      params.push(req.query.santral_id);
+      ekKosul += ` AND s.santral_id = $${params.length}`;
+    } else if (req.query.isletme_id) {
+      params.push(req.query.isletme_id);
+      ekKosul += ` AND s.isletme_id = $${params.length}`;
+    }
+    if (req.query.baslangic) {
+      params.push(req.query.baslangic);
+      ekKosul += ` AND bk.tamamlanma_tarihi >= $${params.length}`;
+    }
+    if (req.query.bitis) {
+      params.push(`${req.query.bitis} 23:59:59`);
+      ekKosul += ` AND bk.tamamlanma_tarihi <= $${params.length}`;
+    }
+
+    const { rows: gorevIdRows } = await req.db.query(
+      `SELECT g.gorev_id
+       FROM bakim_gorevi g
+       JOIN bakim_kaydi bk ON bk.gorev_id = g.gorev_id
+       JOIN bakim_plani bp ON bp.plan_id = g.plan_id
+       JOIN santral s      ON s.santral_id = bp.santral_id
+       WHERE g.durum = 'TAMAMLANDI' AND s.santral_id = ANY($1::uuid[]) ${ekKosul}
+       ORDER BY bk.tamamlanma_tarihi DESC
+       LIMIT 500`,
+      params
     );
 
-    const dokuman = new PDFDocument({ size: "A4", margin: 45 });
-    res.on("error", (err) => console.error("Görev detay PDF akış hatası:", err.message));
-    dokuman.on("error", (err) => console.error("Görev detay PDF üretim hatası:", err.message));
-    dokuman.pipe(res);
-    dokuman.registerFont("DejaVu", FONT_NORMAL);
-    dokuman.registerFont("DejaVu-Bold", FONT_KALIN);
-
-    const genislik = 505; // A4 - 2*45 kenar boşluğu
-
-    dokuman.font("DejaVu-Bold").fontSize(15).fillColor("#0f3d3e").text(kayit.bakim_adi.toUpperCase());
-    dokuman
-      .font("DejaVu")
-      .fontSize(10)
-      .fillColor("#5b6b62")
-      .text(`${kayit.isletme_adi} — ${kayit.santral_adi} — ${kayit.ekipman_adi}`);
-    dokuman.moveDown(0.6);
-    dokuman.strokeColor("#c17a24").lineWidth(1.5).moveTo(45, dokuman.y).lineTo(45 + genislik, dokuman.y).stroke();
-    dokuman.moveDown(0.8);
-
-    const kalemler = kayit.checklist_json?.kalemler || [];
-    const cevaplar = kayit.checklist_sonuclari || {};
-    const TIP_ETIKETLERI = { evet_hayir: "Evet / Hayır", olcum: "Ölçüm", metin: "Serbest metin" };
-
-    kalemler.forEach((kalem) => {
-      if (dokuman.y > 720) dokuman.addPage({ size: "A4", margin: 45 });
-      const cevap = cevaplar[kalem.id]?.deger;
-
-      dokuman.font("DejaVu-Bold").fontSize(10.5).fillColor("#13201c").text(kalem.soru, 45, dokuman.y, {
-        width: genislik,
+    if (gorevIdRows.length === 0) {
+      return res.status(404).json({
+        hata_kodu: "KAYIT_YOK",
+        mesaj: "Seçilen filtrelerle eşleşen tamamlanmış bakım bulunamadı.",
       });
-      dokuman.moveDown(0.15);
+    }
 
-      let cevapMetni = "—";
-      let renk = "#5b6b62";
-      if (kalem.tip === "evet_hayir") {
-        cevapMetni = cevap === true ? "✓ Evet" : cevap === false ? "✗ Hayır" : "—";
-        renk = cevap === true ? "#2c7a4b" : cevap === false ? "#a83b2e" : "#5b6b62";
-      } else if (kalem.tip === "olcum") {
-        cevapMetni = cevap !== undefined && cevap !== "" ? `${cevap}${kalem.birim ? " " + kalem.birim : ""}` : "—";
-      } else {
-        cevapMetni = cevap || "—";
-      }
-      dokuman.font("DejaVu-Bold").fontSize(10).fillColor(renk).text(cevapMetni, 45, dokuman.y, { width: genislik });
-      dokuman.moveDown(0.6);
+    res.setHeader("Content-Type", "application/zip");
+    res.setHeader("Content-Disposition", contentDispositionOlustur("tamamlanan-bakimlar.zip"));
+
+    const arsiv = archiver("zip", { zlib: { level: 9 } });
+    arsiv.on("error", (err) => {
+      console.error("ZIP üretim hatası:", err.message);
+      if (!res.headersSent) next(err);
     });
+    res.on("error", (err) => console.error("ZIP akış hatası (istemci muhtemelen bağlantıyı kesti):", err.message));
+    arsiv.pipe(res);
 
-    dokuman.moveDown(0.3);
-    dokuman.font("DejaVu-Bold").fontSize(10.5).fillColor("#13201c").text("Genel not");
-    dokuman.font("DejaVu").fontSize(10).fillColor("#5b6b62").text(kayit.notlar || "—", { width: genislik });
-    dokuman.moveDown(0.8);
-
-    // Fotoğraflar
-    if (kayit.fotograflar && kayit.fotograflar.length > 0) {
-      dokuman.font("DejaVu-Bold").fontSize(10.5).fillColor("#13201c").text(`Fotoğraflar (${kayit.fotograflar.length})`);
-      dokuman.moveDown(0.3);
-      let x = 45;
-      const fotoGenislik = 110;
-      for (const foto of kayit.fotograflar) {
-        const buffer = await gorseleGetir(foto).catch(() => null);
-        if (buffer) {
-          if (x + fotoGenislik > 45 + genislik) {
-            x = 45;
-            dokuman.moveDown(0.5);
-          }
-          try {
-            dokuman.image(buffer, x, dokuman.y, { width: fotoGenislik });
-          } catch {
-            // bozuk görsel verisi — sessizce atla
-          }
-          x += fotoGenislik + 10;
-        }
-      }
-      dokuman.moveDown(9);
-    }
-
-    if (dokuman.y > 620) dokuman.addPage({ size: "A4", margin: 45 });
-    dokuman.font("DejaVu-Bold").fontSize(10.5).fillColor("#13201c").text("Onay — İmza");
-    dokuman.moveDown(0.3);
-    const imzaBuffer = await gorseleGetir(kayit.imza_url).catch(() => null);
-    if (imzaBuffer) {
+    // Aynı ekipman/bakım adı birden fazla kayıtta tekrar edebilir — dosya
+    // adı çakışmasın diye her birine tarih + kısa bir sayaç ekliyoruz.
+    const kullanilanAdlar = new Set();
+    for (const { gorev_id } of gorevIdRows) {
+      const kayit = await gorevDetayIcinVeriCek(req, gorev_id);
+      if (!kayit) continue;
       try {
-        dokuman.image(imzaBuffer, 45, dokuman.y, { width: 200, height: 90, fit: [200, 90] });
-        dokuman.moveDown(6.5);
-      } catch {
-        dokuman.font("DejaVu").fontSize(9).fillColor("#5b6b62").text("(imza görüntülenemedi)");
+        const buffer = await gorevDetayPdfBufferUret(kayit);
+        const tarihEki = kayit.tamamlanma_tarihi
+          ? new Date(kayit.tamamlanma_tarihi).toISOString().slice(0, 10)
+          : "tarihsiz";
+        let dosyaAdi = dosyaAdiGuvenliHaleGetir(`${tarihEki}-${kayit.santral_adi}-${kayit.ekipman_adi}-${kayit.bakim_adi}.pdf`);
+        let sayac = 2;
+        while (kullanilanAdlar.has(dosyaAdi)) {
+          dosyaAdi = dosyaAdiGuvenliHaleGetir(
+            `${tarihEki}-${kayit.santral_adi}-${kayit.ekipman_adi}-${kayit.bakim_adi}-${sayac}.pdf`
+          );
+          sayac++;
+        }
+        kullanilanAdlar.add(dosyaAdi);
+        arsiv.append(buffer, { name: dosyaAdi });
+      } catch (pdfHatasi) {
+        // Tek bir kaydın PDF'i üretilemezse (ör. bozuk fotoğraf verisi)
+        // TÜM arşivi iptal etmek yerine o kaydı atlayıp devam ediyoruz.
+        console.error(`Görev ${gorev_id} için PDF üretilemedi, ZIP'e eklenmedi:`, pdfHatasi.message);
       }
     }
 
-    dokuman
-      .font("DejaVu")
-      .fontSize(9)
-      .fillColor("#5b6b62")
-      .text(
-        `Tamamlayan: ${kayit.tamamlayan_adi}   |   Tamamlanma tarihi: ${tarihFormatla(kayit.tamamlanma_tarihi)}`
-      );
-
-    dokuman.end();
+    await arsiv.finalize();
   } catch (err) {
     next(err);
   }
