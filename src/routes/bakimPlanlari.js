@@ -74,11 +74,11 @@ router.get("/santraller/:santral_id/bakim-planlari", async (req, res, next) => {
          sd.son_tarih AS son_donem_tarihi,
          sonuc.toplam AS son_donem_toplam,
          sonuc.tamamlanan AS son_donem_tamamlanan,
-         COALESCE(sonuc.geciken, 0) AS son_donem_geciken,
+         COALESCE(genel.geciken_toplam, 0) AS toplam_geciken_gorev_sayisi,
          CASE
            WHEN NOT bp.aktif_mi THEN 'DURDURULAN'
+           WHEN COALESCE(genel.geciken_toplam, 0) > 0 THEN 'GECIKEN'
            WHEN COALESCE(sonuc.toplam, 0) > 0 AND sonuc.tamamlanan = sonuc.toplam THEN 'TAMAMLANAN'
-           WHEN COALESCE(sonuc.geciken, 0) > 0 THEN 'GECIKEN'
            ELSE 'DEVAM_EDEN'
          END AS kategori
        FROM bakim_plani bp
@@ -88,10 +88,18 @@ router.get("/santraller/:santral_id/bakim-planlari", async (req, res, next) => {
          SELECT MAX(planlanan_tarih) AS son_tarih FROM bakim_gorevi WHERE plan_id = bp.plan_id
        ) sd ON true
        LEFT JOIN LATERAL (
-         SELECT COUNT(*) AS toplam, COUNT(*) FILTER (WHERE durum = 'TAMAMLANDI') AS tamamlanan,
-                COUNT(*) FILTER (WHERE durum = 'GECIKTI') AS geciken
+         SELECT COUNT(*) AS toplam, COUNT(*) FILTER (WHERE durum = 'TAMAMLANDI') AS tamamlanan
          FROM bakim_gorevi WHERE plan_id = bp.plan_id AND planlanan_tarih = sd.son_tarih
        ) sonuc ON true
+       LEFT JOIN LATERAL (
+         -- ÖNEMLİ: yalnızca en son dönemi değil, bu plana ait TÜM
+         -- görevleri kontrol ediyoruz — geçmiş bir dönemde kalmış geciken
+         -- bir görev, en son dönem henüz gecikmemiş olsa bile "Geciken"
+         -- kategorisinde görünmeli (aksi halde eski bir gecikme sessizce
+         -- kaybolur, ne banner'da ne bu listede görünür).
+         SELECT COUNT(*) AS geciken_toplam
+         FROM bakim_gorevi WHERE plan_id = bp.plan_id AND durum = 'GECIKTI'
+       ) genel ON true
        WHERE bp.santral_id = $1
        ORDER BY bp.aktif_mi DESC, bp.baslangic_tarihi DESC`,
       [req.params.santral_id]
@@ -416,8 +424,6 @@ router.delete(
           });
         }
 
-        // Zorla silme: görev geçmişini de birlikte kaldır (yalnızca deneme/
-        // test verisi temizliği için kullanılmalı — geri alınamaz).
         await req.db.query("BEGIN");
         await req.db.query(
           `DELETE FROM bakim_kaydi WHERE gorev_id IN (SELECT gorev_id FROM bakim_gorevi WHERE plan_id = $1)`,
