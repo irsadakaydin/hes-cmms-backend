@@ -1,4 +1,5 @@
 const express = require("express");
+const path = require("path");
 const PDFDocument = require("pdfkit");
 const { requireAuth, requireRole } = require("../middleware/auth");
 const { withDbContext } = require("../middleware/dbContext");
@@ -265,6 +266,12 @@ router.post(
       if (!malzemeRows[0]) {
         return res.status(404).json({ hata_kodu: "MALZEME_BULUNAMADI", mesaj: "Malzeme bulunamadı." });
       }
+      if (Number(malzemeRows[0].mevcut_miktar) < Number(miktar)) {
+        return res.status(400).json({
+          hata_kodu: "YETERSIZ_STOK",
+          mesaj: "Depoda talep ettiğiniz miktarda malzeme bulunmamaktadır.",
+        });
+      }
 
       const { rows } = await req.db.query(
         `INSERT INTO depo_cikis (santral_id, malzeme_id, talep_eden_kullanici_id, miktar, kullanim_yeri)
@@ -411,23 +418,26 @@ router.get("/santraller/:santral_id/depo/rapor/pdf", async (req, res, next) => {
     if (await erisimYoksaReddet(req, res, req.params.santral_id)) return;
     const tip = req.query.tip === "cikis" ? "cikis" : "giris";
 
-    const { rows: santralRows } = await req.db.query(`SELECT ad FROM santral WHERE santral_id = $1`, [
-      req.params.santral_id,
-    ]);
+    const { rows: santralRows } = await req.db.query(
+      `SELECT s.ad, i.ad AS isletme_adi FROM santral s JOIN isletme i ON i.isletme_id = s.isletme_id
+       WHERE s.santral_id = $1`,
+      [req.params.santral_id]
+    );
     const santralAdi = santralRows[0]?.ad || "";
+    const isletmeAdi = santralRows[0]?.isletme_adi || "";
 
     const params = [req.params.santral_id];
     let sorgu;
     if (tip === "giris") {
       sorgu = `SELECT g.fis_no, g.giris_tarihi AS tarih, m.ad AS malzeme_adi, m.sku, g.miktar, m.birim,
-                      k.ad_soyad AS ilgili_kisi
+                      k.ad_soyad AS ilgili_kisi, NULL AS kullanim_yeri
                FROM depo_giris g
                JOIN depo_malzeme m ON m.malzeme_id = g.malzeme_id
                LEFT JOIN kullanici k ON k.kullanici_id = g.teslim_alan_kullanici_id
                WHERE g.santral_id = $1`;
     } else {
       sorgu = `SELECT c.fis_no, c.cikis_tarihi AS tarih, m.ad AS malzeme_adi, m.sku, c.miktar, m.birim,
-                      k.ad_soyad AS ilgili_kisi
+                      k.ad_soyad AS ilgili_kisi, c.kullanim_yeri
                FROM depo_cikis c
                JOIN depo_malzeme m ON m.malzeme_id = c.malzeme_id
                LEFT JOIN kullanici k ON k.kullanici_id = c.talep_eden_kullanici_id
@@ -444,70 +454,124 @@ router.get("/santraller/:santral_id/depo/rapor/pdf", async (req, res, next) => {
     sorgu += ` ORDER BY tarih DESC`;
     const { rows } = await req.db.query(sorgu, params);
 
-    const dokuman = new PDFDocument({ size: "A4", layout: "landscape", margin: 40 });
-    // pdfkit'in varsayılan Helvetica fontu Türkçe karakterleri (ç, ğ, ı,
-    // ö, ş, ü) doğru göstermiyor — bu yüzden Türkçe dahil geniş Unicode
-    // desteği olan DejaVu Sans fontunu gömüyoruz.
-    const path = require("path");
-    dokuman.registerFont("TR", path.join(__dirname, "..", "fonts", "DejaVuSans.ttf"));
-    dokuman.registerFont("TR-Bold", path.join(__dirname, "..", "fonts", "DejaVuSans-Bold.ttf"));
-    dokuman.font("TR");
+    // Font dosyaları src/ klasörünün KÖKÜNDE duruyor — "Rapor Oluştur"
+    // (raporlar.js) sayfasıyla AYNI dosyalar kullanılıyor, ayrıca
+    // yüklemeye gerek yok.
+    const FONT_NORMAL = path.join(__dirname, "..", "DejaVuSans.ttf");
+    const FONT_KALIN = path.join(__dirname, "..", "DejaVuSans-Bold.ttf");
+    const tarihFormatla = (d) => (d ? new Date(d).toLocaleDateString("tr-TR") : "—");
+
+    const dokuman = new PDFDocument({ size: "A4", margin: 40, layout: "landscape" });
     res.setHeader("Content-Type", "application/pdf");
-    res.setHeader(
-      "Content-Disposition",
-      `attachment; filename="depo-${tip}-raporu.pdf"`
-    );
+    res.setHeader("Content-Disposition", `attachment; filename="depo-${tip}-raporu.pdf"`);
+    res.on("error", (err) => console.error("Depo rapor akışı hatası:", err.message));
+    dokuman.on("error", (err) => console.error("Depo PDF üretim hatası:", err.message));
     dokuman.pipe(res);
+    dokuman.registerFont("DejaVu", FONT_NORMAL);
+    dokuman.registerFont("DejaVu-Bold", FONT_KALIN);
 
-    dokuman.fontSize(16).text(`${santralAdi} — Depo ${tip === "giris" ? "Malzeme Giriş" : "Malzeme Çıkış"} Raporu`, {
-      align: "left",
-    });
-    dokuman.moveDown();
+    // "Rapor Oluştur" sayfasındaki BİREBİR AYNI başlık/üst bilgi düzeni.
+    dokuman.font("DejaVu-Bold").fontSize(16).fillColor("#0f3d3e").text("HES Bakım Yönetim Sistemi");
+    dokuman
+      .font("DejaVu-Bold")
+      .fontSize(12)
+      .fillColor("#13201c")
+      .text(`${isletmeAdi} — ${santralAdi} — Depo ${tip === "giris" ? "Malzeme Giriş" : "Malzeme Çıkış"} Raporu`);
+    const donemMetni =
+      req.query.baslangic || req.query.bitis
+        ? `Dönem: ${req.query.baslangic ? tarihFormatla(req.query.baslangic) : "…"} – ${
+            req.query.bitis ? tarihFormatla(req.query.bitis) : "…"
+          }`
+        : "Dönem: Tüm zamanlar";
+    dokuman
+      .font("DejaVu")
+      .fontSize(8)
+      .fillColor("#5b6b62")
+      .text(`${donemMetni}   |   Rapor tarihi: ${tarihFormatla(new Date())}`);
+    dokuman.moveDown(0.8);
+    dokuman.strokeColor("#c17a24").lineWidth(1.5).moveTo(40, dokuman.y).lineTo(802, dokuman.y).stroke();
+    dokuman.moveDown(0.6);
 
-    const sutunlar = [
-      { baslik: "Fiş No", genislik: 110 },
-      { baslik: "Tarih", genislik: 130 },
-      { baslik: "Malzeme", genislik: 220 },
-      { baslik: "SKU", genislik: 110 },
-      { baslik: "Miktar", genislik: 100 },
-      { baslik: "İlgili Kişi", genislik: 150 },
-    ];
+    // Tablo — "Rapor Oluştur"la aynı stil: koyu dolgu yerine kalın/teal
+    // başlık metni + ince ayraç çizgisi.
+    const sutunlar =
+      tip === "giris"
+        ? [
+            { baslik: "Fiş No", genislik: 95 },
+            { baslik: "Tarih", genislik: 95 },
+            { baslik: "Malzeme", genislik: 220 },
+            { baslik: "SKU", genislik: 95 },
+            { baslik: "Miktar", genislik: 90 },
+            { baslik: "İlgili Kişi", genislik: 160 },
+          ]
+        : [
+            { baslik: "Fiş No", genislik: 85 },
+            { baslik: "Tarih", genislik: 85 },
+            { baslik: "Malzeme", genislik: 175 },
+            { baslik: "SKU", genislik: 80 },
+            { baslik: "Miktar", genislik: 75 },
+            { baslik: "Kullanım Yeri", genislik: 170 },
+            { baslik: "İlgili Kişi", genislik: 130 },
+          ];
     const tabloSolX = 40;
-    const SATIR_YUKSEKLIGI = 20;
     let y = dokuman.y;
+    const SATIR_YUKSEKLIGI = 16;
 
-    function hucreYaz(metin, sutunIndex, baslikMi) {
+    function hucreYaz(metin, sutunIndex, kalinMi, renk) {
       let x = tabloSolX;
       for (let i = 0; i < sutunIndex; i++) x += sutunlar[i].genislik;
       dokuman
-        .font(baslikMi ? "TR-Bold" : "TR")
-        .fontSize(9)
-        .fillColor(baslikMi ? "#ffffff" : "#13201c")
-        .text(String(metin ?? "—"), x + 4, y + 5, { width: sutunlar[sutunIndex].genislik - 8 });
+        .font(kalinMi ? "DejaVu-Bold" : "DejaVu")
+        .fontSize(8.5)
+        .fillColor(renk || "#13201c")
+        .text(String(metin ?? "—"), x, y, {
+          width: sutunlar[sutunIndex].genislik - 8,
+          height: SATIR_YUKSEKLIGI,
+          ellipsis: true,
+          lineBreak: false,
+        });
     }
 
-    dokuman.rect(tabloSolX, y, sutunlar.reduce((a, s) => a + s.genislik, 0), SATIR_YUKSEKLIGI).fill("#0f3d3e");
-    sutunlar.forEach((s, i) => hucreYaz(s.baslik, i, true));
+    sutunlar.forEach((s, i) => hucreYaz(s.baslik, i, true, "#0f3d3e"));
     y += SATIR_YUKSEKLIGI;
+    dokuman.strokeColor("#c9d0c8").lineWidth(0.5).moveTo(tabloSolX, y - 2).lineTo(802, y - 2).stroke();
+    y += 2;
 
     rows.forEach((r) => {
-      if (y > 500) {
+      if (y > 555) {
         dokuman.addPage({ size: "A4", layout: "landscape", margin: 40 });
-        dokuman.font("TR");
         y = 40;
       }
       hucreYaz(r.fis_no, 0, false);
-      hucreYaz(new Date(r.tarih).toLocaleString("tr-TR"), 1, false);
+      hucreYaz(tarihFormatla(r.tarih), 1, false);
       hucreYaz(r.malzeme_adi, 2, false);
       hucreYaz(r.sku, 3, false);
       hucreYaz(`${r.miktar} ${r.birim}`, 4, false);
-      hucreYaz(r.ilgili_kisi, 5, false);
+      if (tip === "giris") {
+        hucreYaz(r.ilgili_kisi, 5, false);
+      } else {
+        hucreYaz(r.kullanim_yeri, 5, false);
+        hucreYaz(r.ilgili_kisi, 6, false);
+      }
       y += SATIR_YUKSEKLIGI;
     });
 
     if (rows.length === 0) {
-      dokuman.fontSize(10).fillColor("#5b6b62").text("Seçilen aralıkta kayıt bulunamadı.", tabloSolX, y + 10);
+      dokuman.font("DejaVu").fontSize(9).fillColor("#5b6b62").text("Seçilen aralıkta kayıt bulunamadı.", tabloSolX, y);
+      y += SATIR_YUKSEKLIGI;
     }
+
+    // "Rapor Oluştur"daki gibi onay/imza alanları.
+    y += 30;
+    if (y > 540) {
+      dokuman.addPage({ size: "A4", layout: "landscape", margin: 40 });
+      y = 40;
+    }
+    dokuman.font("DejaVu").fontSize(9).fillColor("#5b6b62");
+    dokuman.text("Depo Sorumlusu", tabloSolX, y);
+    dokuman.text("_____________________", tabloSolX, y + 30);
+    dokuman.text("İşletme Yöneticisi / Müdürü", tabloSolX + 300, y);
+    dokuman.text("_____________________", tabloSolX + 300, y + 30);
 
     dokuman.end();
   } catch (err) {
