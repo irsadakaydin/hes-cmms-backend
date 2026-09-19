@@ -425,6 +425,13 @@ router.get("/santraller/:santral_id/depo/rapor/pdf", async (req, res, next) => {
     const { rows } = await req.db.query(sorgu, params);
 
     const dokuman = new PDFDocument({ size: "A4", layout: "landscape", margin: 40 });
+    // pdfkit'in varsayılan Helvetica fontu Türkçe karakterleri (ç, ğ, ı,
+    // ö, ş, ü) doğru göstermiyor — bu yüzden Türkçe dahil geniş Unicode
+    // desteği olan DejaVu Sans fontunu gömüyoruz.
+    const path = require("path");
+    dokuman.registerFont("TR", path.join(__dirname, "..", "fonts", "DejaVuSans.ttf"));
+    dokuman.registerFont("TR-Bold", path.join(__dirname, "..", "fonts", "DejaVuSans-Bold.ttf"));
+    dokuman.font("TR");
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader(
       "Content-Disposition",
@@ -453,6 +460,7 @@ router.get("/santraller/:santral_id/depo/rapor/pdf", async (req, res, next) => {
       let x = tabloSolX;
       for (let i = 0; i < sutunIndex; i++) x += sutunlar[i].genislik;
       dokuman
+        .font(baslikMi ? "TR-Bold" : "TR")
         .fontSize(9)
         .fillColor(baslikMi ? "#ffffff" : "#13201c")
         .text(String(metin ?? "—"), x + 4, y + 5, { width: sutunlar[sutunIndex].genislik - 8 });
@@ -465,6 +473,7 @@ router.get("/santraller/:santral_id/depo/rapor/pdf", async (req, res, next) => {
     rows.forEach((r) => {
       if (y > 500) {
         dokuman.addPage({ size: "A4", layout: "landscape", margin: 40 });
+        dokuman.font("TR");
         y = 40;
       }
       hucreYaz(r.fis_no, 0, false);
