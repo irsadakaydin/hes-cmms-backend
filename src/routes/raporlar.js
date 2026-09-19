@@ -478,8 +478,8 @@ router.get("/ozet-banner", requireRole(...RAPOR_ROLLERI), async (req, res, next)
          sd.son_tarih AS son_donem_tarihi,
          CASE
            WHEN NOT bp.aktif_mi THEN 'DURDURULAN'
+           WHEN COALESCE(genel.geciken_toplam, 0) > 0 THEN 'GECIKEN'
            WHEN COALESCE(sonuc.toplam, 0) > 0 AND sonuc.tamamlanan = sonuc.toplam THEN 'TAMAMLANAN'
-           WHEN COALESCE(sonuc.geciken, 0) > 0 THEN 'GECIKEN'
            ELSE 'DEVAM_EDEN'
          END AS kategori
        FROM bakim_plani bp
@@ -487,10 +487,17 @@ router.get("/ozet-banner", requireRole(...RAPOR_ROLLERI), async (req, res, next)
          SELECT MAX(planlanan_tarih) AS son_tarih FROM bakim_gorevi WHERE plan_id = bp.plan_id
        ) sd ON true
        LEFT JOIN LATERAL (
-         SELECT COUNT(*) AS toplam, COUNT(*) FILTER (WHERE durum = 'TAMAMLANDI') AS tamamlanan,
-                COUNT(*) FILTER (WHERE durum = 'GECIKTI') AS geciken
+         SELECT COUNT(*) AS toplam, COUNT(*) FILTER (WHERE durum = 'TAMAMLANDI') AS tamamlanan
          FROM bakim_gorevi WHERE plan_id = bp.plan_id AND planlanan_tarih = sd.son_tarih
        ) sonuc ON true
+       LEFT JOIN LATERAL (
+         -- ÖNEMLİ: yalnızca en son dönemi değil, bu plana ait TÜM
+         -- görevleri kontrol ediyoruz — geçmiş bir dönemde kalmış geciken
+         -- bir görev, en son dönem henüz gecikmemiş olsa bile banner'da
+         -- "Geciken" olarak görünmeli.
+         SELECT COUNT(*) AS geciken_toplam
+         FROM bakim_gorevi WHERE plan_id = bp.plan_id AND durum = 'GECIKTI'
+       ) genel ON true
        WHERE bp.santral_id = ANY($1::uuid[])`,
       [[...santralMap.keys()]]
     );
