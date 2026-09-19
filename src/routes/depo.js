@@ -579,4 +579,97 @@ router.get("/santraller/:santral_id/depo/rapor/pdf", async (req, res, next) => {
   }
 });
 
+// GET /api/v1/depo/malzemeler/:malzeme_id/karekod-pdf — malzemenin
+// karekodunu (ad/SKU bilgisiyle birlikte) tek sayfalık bir PDF olarak
+// üretir. Karekod görseli dış bir servisten (api.qrserver.com) PNG olarak
+// alınıp PDF'e gömülür.
+router.get("/depo/malzemeler/:malzeme_id/karekod-pdf", async (req, res, next) => {
+  try {
+    const { rows } = await req.db.query(
+      `SELECT m.*, s.ad AS santral_adi, i.ad AS isletme_adi
+       FROM depo_malzeme m
+       JOIN santral s ON s.santral_id = m.santral_id
+       JOIN isletme i ON i.isletme_id = s.isletme_id
+       WHERE m.malzeme_id = $1`,
+      [req.params.malzeme_id]
+    );
+    const malzeme = rows[0];
+    if (!malzeme) {
+      return res.status(404).json({ hata_kodu: "MALZEME_BULUNAMADI", mesaj: "Malzeme bulunamadı." });
+    }
+    if (await erisimYoksaReddet(req, res, malzeme.santral_id)) return;
+
+    // Hedef URL (karekodun taşıyacağı bağlantı), sunucunun tahmin etmesi
+    // yerine DOĞRUDAN tarayıcıdan (gerçek alan adını bilen taraf) gelir.
+    const hedefUrl = req.query.hedef_url;
+    if (!hedefUrl) {
+      return res.status(400).json({ hata_kodu: "EKSIK_ALAN", mesaj: "hedef_url parametresi zorunludur." });
+    }
+    const karekodApiUrl = `https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=${encodeURIComponent(hedefUrl)}`;
+
+    let karekodBuffer = null;
+    try {
+      const yanit = await fetch(karekodApiUrl);
+      if (yanit.ok) {
+        karekodBuffer = Buffer.from(await yanit.arrayBuffer());
+      }
+    } catch {
+      // karekod servisi ulaşılamazsa PDF yine de metinle üretilir
+    }
+
+    const FONT_NORMAL = path.join(__dirname, "..", "DejaVuSans.ttf");
+    const FONT_KALIN = path.join(__dirname, "..", "DejaVuSans-Bold.ttf");
+
+    const dokuman = new PDFDocument({ size: "A4", margin: 50 });
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="karekod-${malzeme.sku}.pdf"`);
+    res.on("error", (err) => console.error("Karekod PDF akış hatası:", err.message));
+    dokuman.on("error", (err) => console.error("Karekod PDF üretim hatası:", err.message));
+    dokuman.pipe(res);
+    dokuman.registerFont("DejaVu", FONT_NORMAL);
+    dokuman.registerFont("DejaVu-Bold", FONT_KALIN);
+
+    dokuman.font("DejaVu-Bold").fontSize(16).fillColor("#0f3d3e").text("HES Bakım Yönetim Sistemi", { align: "center" });
+    dokuman.font("DejaVu").fontSize(10).fillColor("#5b6b62").text("Depo Malzeme Karekodu", { align: "center" });
+    dokuman.moveDown(1.2);
+    dokuman.strokeColor("#c17a24").lineWidth(1.5).moveTo(50, dokuman.y).lineTo(545, dokuman.y).stroke();
+    dokuman.moveDown(1.5);
+
+    if (karekodBuffer) {
+      const boyut = 260;
+      const x = (595 - boyut) / 2; // A4 genişliği ~595pt
+      dokuman.image(karekodBuffer, x, dokuman.y, { width: boyut, height: boyut });
+      dokuman.moveDown(boyut / 12 + 2);
+    } else {
+      dokuman.font("DejaVu").fontSize(10).fillColor("#a83b2e").text("(Karekod görseli oluşturulamadı)", { align: "center" });
+      dokuman.moveDown(1);
+    }
+
+    dokuman.font("DejaVu-Bold").fontSize(14).fillColor("#13201c").text(malzeme.ad, { align: "center" });
+    dokuman
+      .font("DejaVu")
+      .fontSize(10)
+      .fillColor("#5b6b62")
+      .text(`SKU: ${malzeme.sku}`, { align: "center" });
+    dokuman
+      .font("DejaVu")
+      .fontSize(9)
+      .fillColor("#5b6b62")
+      .text(`${malzeme.isletme_adi} — ${malzeme.santral_adi}`, { align: "center" });
+    dokuman.moveDown(1);
+    dokuman
+      .font("DejaVu")
+      .fontSize(9)
+      .fillColor("#5b6b62")
+      .text("Bu karekodu okutan oturum açmış bir kullanıcı, bu malzeme için doğrudan çıkış talebi oluşturabilir.", {
+        align: "center",
+        width: 400,
+      });
+
+    dokuman.end();
+  } catch (err) {
+    next(err);
+  }
+});
+
 module.exports = router;
