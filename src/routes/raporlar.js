@@ -1044,6 +1044,57 @@ async function gorevDetayPdfBufferUret(kayit) {
   });
 }
 
+// GET /api/v1/raporlar/gorevler-durum?santral_id=&durum=BEKLIYOR|GECIKTI
+// "Bakımlar" sayfasındaki Devam Eden / Geciken sekmeleri için — banner ile
+// BİREBİR AYNI sayımı (GÖREV seviyesinde) elde edebilmek amacıyla, ilgili
+// durumdaki her görevi (plan bilgisiyle birlikte) tek tek döner. Tarih
+// aralığından KASITLI OLARAK bağımsızdır — banner'daki Devam Eden/Geciken
+// sayıları da döneme bağlı değildir (bkz. /ozet-banner).
+router.get("/gorevler-durum", requireRole(...RAPOR_ROLLERI), async (req, res, next) => {
+  try {
+    const santralIdleri = await erisilenSantralIdleri(req);
+    if (santralIdleri.length === 0) {
+      return res.json({ veri: [] });
+    }
+    const durum = ["BEKLIYOR", "GECIKTI"].includes(req.query.durum) ? req.query.durum : "BEKLIYOR";
+
+    const params = [santralIdleri, durum];
+    let ekKosul = "";
+    if (req.query.santral_id) {
+      params.push(req.query.santral_id);
+      ekKosul += ` AND s.santral_id = $${params.length}`;
+    } else if (req.query.isletme_id) {
+      params.push(req.query.isletme_id);
+      ekKosul += ` AND s.isletme_id = $${params.length}`;
+    }
+
+    const { rows } = await req.db.query(
+      `SELECT g.gorev_id, g.plan_id, g.planlanan_tarih, bp.periyot, bp.aktif_mi,
+              s.ad AS santral_adi, e.ad AS ekipman_adi, bs.ad AS bakim_adi,
+              atanan.ad_soyad AS atanan_personel,
+              COALESCE(
+                (SELECT json_agg(json_build_object('kullanici_id', k.kullanici_id, 'ad_soyad', k.ad_soyad) ORDER BY k.ad_soyad)
+                 FROM bakim_plani_sorumlu bps
+                 JOIN kullanici k ON k.kullanici_id = bps.kullanici_id
+                 WHERE bps.plan_id = bp.plan_id),
+                '[]'
+              ) AS sorumlular
+       FROM bakim_gorevi g
+       JOIN bakim_plani bp   ON bp.plan_id = g.plan_id
+       JOIN santral s        ON s.santral_id = bp.santral_id
+       JOIN ekipman e        ON e.ekipman_id = bp.ekipman_id
+       JOIN bakim_sablonu bs ON bs.sablon_id = bp.sablon_id
+       JOIN kullanici atanan ON atanan.kullanici_id = g.atanan_kullanici_id
+       WHERE g.durum = $2 AND s.santral_id = ANY($1::uuid[]) ${ekKosul}
+       ORDER BY g.planlanan_tarih ASC`,
+      params
+    );
+    res.json({ veri: rows });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // GET /api/v1/raporlar/tamamlanan-gorevler?baslangic=&bitis=&santral_id=&isletme_id=
 // Seçim listesini doldurur — tarih aralığındaki TAMAMLANDI görevleri listeler.
 router.get("/tamamlanan-gorevler", requireRole(...RAPOR_ROLLERI), async (req, res, next) => {
