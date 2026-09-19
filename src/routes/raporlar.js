@@ -438,13 +438,15 @@ function pdfBakimTablosuCiz(dokuman, gorevler) {
 }
 
 // GET /api/v1/raporlar/ozet-banner?baslangic=&bitis= — santral bazlı devam
-// eden/geciken/tamamlanan/durdurulan PLAN sayılarını döner (2. banner'daki
-// dairesel göstergeler için). Bakımlar sayfasıyla AYNI kategori mantığını
-// kullanır (plan bazlı, çoklu sorumluda herkes onaylamadan tamamlanan
-// sayılmaz) — böylece banner ile Bakımlar sayfasındaki sayılar HER ZAMAN
-// birebir tutar. Geciken ve Durdurulan her zaman güncel durumu yansıtır
-// (dönem filtresinden bağımsızdır); yalnızca Devam Eden/Tamamlanan, son
-// dönem tarihine göre seçilen aralıkla sınırlanır.
+// eden/geciken/tamamlanan/durdurulan GÖREV sayılarını döner (2. banner'daki
+// dairesel göstergeler için). Bu sayım GÖREV (bakim_gorevi) seviyesindedir
+// — bir plan tek satır olarak değil, ürettiği HER görev instance'ı ayrı
+// ayrı sayılır (istisna: Durdurulan, doğası gereği PLAN sayısıdır, çünkü
+// pasifleştirilen bir planın kendisi durur, tek tek görevleri değil).
+// Devam Eden ve Geciken HER ZAMAN güncel toplam durumu yansıtır (dönem
+// filtresinden bağımsızdır) — bir görevin "bekliyor/gecikti" olması,
+// seçilen tarih aralığına göre değişen bir şey değildir. Yalnızca
+// Tamamlanan, seçilen dönemde TAMAMLANAN görevlerle sınırlanır.
 router.get("/ozet-banner", requireRole(...RAPOR_ROLLERI), async (req, res, next) => {
   try {
     const santralIdleri = await erisilenSantralIdleri(req);
@@ -459,9 +461,9 @@ router.get("/ozet-banner", requireRole(...RAPOR_ROLLERI), async (req, res, next)
       holdingKosulu = ` AND s.isletme_id = $${params.length}`;
     }
 
-    // Önce erişilebilir TÜM santralleri (planı olsun olmasın) sıfır
-    // sayımlarla map'e ekliyoruz — aksi halde hiç planı olmayan bir santral
-    // banner'da hiç görünmezdi.
+    // Önce erişilebilir TÜM santralleri (görevi olsun olmasın) sıfır
+    // sayımlarla map'e ekliyoruz — aksi halde hiç görevi olmayan bir
+    // santral banner'da hiç görünmezdi.
     const { rows: tumSantraller } = await req.db.query(
       `SELECT s.santral_id, s.ad AS santral_adi, s.isletme_id, i.ad AS isletme_adi
        FROM santral s JOIN isletme i ON i.isletme_id = s.isletme_id
@@ -472,56 +474,43 @@ router.get("/ozet-banner", requireRole(...RAPOR_ROLLERI), async (req, res, next)
     for (const s of tumSantraller) {
       santralMap.set(s.santral_id, { ...s, devam_eden: 0, geciken: 0, tamamlanan: 0, durdurulan: 0 });
     }
+    const santralIdSet = new Set(santralMap.keys());
 
-    const { rows: planlar } = await req.db.query(
+    const { rows: gorevSayimlari } = await req.db.query(
       `SELECT bp.santral_id,
-         sd.son_tarih AS son_donem_tarihi,
-         CASE
-           WHEN NOT bp.aktif_mi THEN 'DURDURULAN'
-           WHEN COALESCE(genel.geciken_toplam, 0) > 0 THEN 'GECIKEN'
-           WHEN COALESCE(sonuc.toplam, 0) > 0 AND sonuc.tamamlanan = sonuc.toplam THEN 'TAMAMLANAN'
-           ELSE 'DEVAM_EDEN'
-         END AS kategori
-       FROM bakim_plani bp
-       LEFT JOIN LATERAL (
-         SELECT MAX(planlanan_tarih) AS son_tarih FROM bakim_gorevi WHERE plan_id = bp.plan_id
-       ) sd ON true
-       LEFT JOIN LATERAL (
-         SELECT COUNT(*) AS toplam, COUNT(*) FILTER (WHERE durum = 'TAMAMLANDI') AS tamamlanan
-         FROM bakim_gorevi WHERE plan_id = bp.plan_id AND planlanan_tarih = sd.son_tarih
-       ) sonuc ON true
-       LEFT JOIN LATERAL (
-         -- ÖNEMLİ: yalnızca en son dönemi değil, bu plana ait TÜM
-         -- görevleri kontrol ediyoruz — geçmiş bir dönemde kalmış geciken
-         -- bir görev, en son dönem henüz gecikmemiş olsa bile banner'da
-         -- "Geciken" olarak görünmeli.
-         SELECT COUNT(*) AS geciken_toplam
-         FROM bakim_gorevi WHERE plan_id = bp.plan_id AND durum = 'GECIKTI'
-       ) genel ON true
-       WHERE bp.santral_id = ANY($1::uuid[])`,
-      [[...santralMap.keys()]]
+              COUNT(*) FILTER (WHERE g.durum = 'BEKLIYOR') AS bekliyor,
+              COUNT(*) FILTER (WHERE g.durum = 'GECIKTI') AS gecikti,
+              COUNT(*) FILTER (
+                WHERE g.durum = 'TAMAMLANDI'
+                  AND ($2::date IS NULL OR bk.tamamlanma_tarihi >= $2)
+                  AND ($3::date IS NULL OR bk.tamamlanma_tarihi <= $3::date + INTERVAL '1 day')
+              ) AS tamamlandi
+       FROM bakim_gorevi g
+       JOIN bakim_plani bp ON bp.plan_id = g.plan_id
+       LEFT JOIN bakim_kaydi bk ON bk.gorev_id = g.gorev_id
+       WHERE bp.santral_id = ANY($1::uuid[])
+       GROUP BY bp.santral_id`,
+      [[...santralIdSet], req.query.baslangic || null, req.query.bitis || null]
     );
-
-    // Tarih aralığı filtresi (varsa) — yalnızca DEVAM_EDEN/TAMAMLANAN'a
-    // uygulanır; GECIKEN/DURDURULAN her zaman sayılır. Bakımlar sayfasındaki
-    // mantıkla birebir aynı.
-    const filtreli = planlar.filter((p) => {
-      if (p.kategori !== "TAMAMLANAN") return true;
-      if (!req.query.baslangic && !req.query.bitis) return true;
-      if (!p.son_donem_tarihi) return true;
-      const tarih = new Date(p.son_donem_tarihi);
-      if (req.query.baslangic && tarih < new Date(req.query.baslangic)) return false;
-      if (req.query.bitis && tarih > new Date(`${req.query.bitis}T23:59:59`)) return false;
-      return true;
-    });
-
-    for (const p of filtreli) {
-      const kayit = santralMap.get(p.santral_id);
+    for (const s of gorevSayimlari) {
+      const kayit = santralMap.get(s.santral_id);
       if (!kayit) continue;
-      if (p.kategori === "DEVAM_EDEN") kayit.devam_eden++;
-      else if (p.kategori === "GECIKEN") kayit.geciken++;
-      else if (p.kategori === "TAMAMLANAN") kayit.tamamlanan++;
-      else if (p.kategori === "DURDURULAN") kayit.durdurulan++;
+      kayit.devam_eden = Number(s.bekliyor);
+      kayit.geciken = Number(s.gecikti);
+      kayit.tamamlanan = Number(s.tamamlandi);
+    }
+
+    // Durdurulan — bu tek başına PLAN sayısıdır (pasifleştirilmiş bakım
+    // planlarının sayısı), çünkü bir "durdurulmuş görev" kavramı yok.
+    const { rows: durdurulanPlanlar } = await req.db.query(
+      `SELECT santral_id, COUNT(*) AS sayi FROM bakim_plani
+       WHERE santral_id = ANY($1::uuid[]) AND aktif_mi = FALSE
+       GROUP BY santral_id`,
+      [[...santralIdSet]]
+    );
+    for (const d of durdurulanPlanlar) {
+      const kayit = santralMap.get(d.santral_id);
+      if (kayit) kayit.durdurulan = Number(d.sayi);
     }
 
     const sonuc = [...santralMap.values()].sort(
