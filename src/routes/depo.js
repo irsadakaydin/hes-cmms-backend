@@ -109,6 +109,26 @@ router.get("/santraller/:santral_id/depo/malzemeler", async (req, res, next) => 
   }
 });
 
+// GET /api/v1/depo/malzemeler/:malzeme_id — TEK bir malzemeyi santral
+// bilgisi dahil döner. Karekod okutulunca açılan çıkış-talep sayfası,
+// hangi santralde olduğunu önceden bilmeden yalnızca malzeme_id ile bu
+// uç noktayı kullanır.
+router.get("/depo/malzemeler/:malzeme_id", async (req, res, next) => {
+  try {
+    const { rows } = await req.db.query(`SELECT * FROM depo_malzeme WHERE malzeme_id = $1`, [
+      req.params.malzeme_id,
+    ]);
+    const malzeme = rows[0];
+    if (!malzeme) {
+      return res.status(404).json({ hata_kodu: "MALZEME_BULUNAMADI", mesaj: "Malzeme bulunamadı." });
+    }
+    if (await erisimYoksaReddet(req, res, malzeme.santral_id)) return;
+    res.json(malzeme);
+  } catch (err) {
+    next(err);
+  }
+});
+
 // ---------------------------------------------------------------------
 // MALZEME GİRİŞ — Santral Sorumlusu ve üstü.
 // ---------------------------------------------------------------------
@@ -231,7 +251,7 @@ router.post(
   async (req, res, next) => {
     try {
       if (await erisimYoksaReddet(req, res, req.params.santral_id)) return;
-      const { malzeme_id, miktar } = req.body;
+      const { malzeme_id, miktar, kullanim_yeri } = req.body;
       if (!malzeme_id || miktar == null || Number(miktar) <= 0) {
         return res.status(400).json({
           hata_kodu: "EKSIK_ALAN",
@@ -247,10 +267,10 @@ router.post(
       }
 
       const { rows } = await req.db.query(
-        `INSERT INTO depo_cikis (santral_id, malzeme_id, talep_eden_kullanici_id, miktar)
-         VALUES ($1, $2, $3, $4)
+        `INSERT INTO depo_cikis (santral_id, malzeme_id, talep_eden_kullanici_id, miktar, kullanim_yeri)
+         VALUES ($1, $2, $3, $4, $5)
          RETURNING *`,
-        [req.params.santral_id, malzeme_id, req.user.kullanici_id, miktar]
+        [req.params.santral_id, malzeme_id, req.user.kullanici_id, miktar, kullanim_yeri || null]
       );
       res.status(201).json(rows[0]);
     } catch (err) {
