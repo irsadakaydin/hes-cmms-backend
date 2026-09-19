@@ -75,6 +75,24 @@ async function kritikStokUyarisiGonder(req, malzeme) {
   }
 }
 
+// Bir çıkış talebi reddedilince, talebi yapan kullanıcıya bildirim gönderir.
+// Aynı şekilde kendi try/catch'i içinde — başarısız olsa bile reddetme
+// işleminin kendisini ETKİLEMEZ.
+async function cikisRedBildirimiGonder(req, talep) {
+  try {
+    const mesajMetni = talep.red_notu
+      ? `"${talep.malzeme_adi}" (${talep.miktar} ${talep.birim}) için çıkış talebiniz onaylanmamıştır. Not: ${talep.red_notu}`
+      : `"${talep.malzeme_adi}" (${talep.miktar} ${talep.birim}) için çıkış talebiniz onaylanmamıştır.`;
+    await req.db.query(
+      `INSERT INTO mesaj (gonderen_kullanici_id, alici_kullanici_id, konu, icerik)
+       VALUES ($1, $2, 'İsteğiniz Onaylanmamıştır', $3)`,
+      [req.user.kullanici_id, talep.talep_eden_kullanici_id, mesajMetni]
+    );
+  } catch (err) {
+    console.error("Çıkış red bildirimi gönderilemedi (mesaj tablosu şeması doğrulanmalı):", err.message);
+  }
+}
+
 // ---------------------------------------------------------------------
 // DEPO MALZEME LİSTESİ — herkes (santrale erişimi olan herkes) görebilir.
 // ---------------------------------------------------------------------
@@ -312,10 +330,11 @@ router.post(
     try {
       if (await erisimYoksaReddet(req, res, req.params.santral_id)) return;
       const { rows } = await req.db.query(
-        `UPDATE depo_cikis
+        `UPDATE depo_cikis c
          SET durum = 'REDDEDILDI', onaylayan_kullanici_id = $1, red_notu = $2
          WHERE cikis_id = $3 AND santral_id = $4 AND durum = 'BEKLIYOR'
-         RETURNING *`,
+         RETURNING c.*, (SELECT ad FROM depo_malzeme m WHERE m.malzeme_id = c.malzeme_id) AS malzeme_adi,
+                   (SELECT birim FROM depo_malzeme m WHERE m.malzeme_id = c.malzeme_id) AS birim`,
         [req.user.kullanici_id, req.body.red_notu || null, req.params.cikis_id, req.params.santral_id]
       );
       if (!rows[0]) {
@@ -324,6 +343,7 @@ router.post(
           mesaj: "Bekleyen bir çıkış talebi bulunamadı.",
         });
       }
+      await cikisRedBildirimiGonder(req, rows[0]);
       res.json(rows[0]);
     } catch (err) {
       next(err);
