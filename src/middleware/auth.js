@@ -4,6 +4,10 @@ const jwt = require("jsonwebtoken");
  * Authorization: Bearer <token> başlığını doğrular ve
  * req.user = { kullanici_id, rol, isletme_id } atar.
  * isletme_id, Platform Admin (rol = 'ADMIN') için null olabilir.
+ *
+ * NOT: Tek-cihaz oturum kontrolü GEÇİCİ OLARAK KALDIRILDI (sistem geneli
+ * bir soruna yol açtığı için) — kök sebep bulunup düzeltildikten sonra
+ * tekrar eklenecek.
  */
 function requireAuth(req, res, next) {
   const header = req.headers.authorization || "";
@@ -22,6 +26,7 @@ function requireAuth(req, res, next) {
       kullanici_id: payload.kullanici_id,
       rol: payload.rol,
       isletme_id: payload.isletme_id,
+      jti: payload.jti,
     };
     next();
   } catch (err) {
