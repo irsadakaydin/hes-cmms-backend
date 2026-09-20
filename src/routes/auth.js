@@ -1,6 +1,7 @@
 const express = require("express");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
+const crypto = require("crypto");
 const { pool } = require("../db");
 const { requireAuth } = require("../middleware/auth");
 const { withDbContext } = require("../middleware/dbContext");
@@ -10,7 +11,7 @@ const router = express.Router();
 // POST /api/v1/auth/login
 router.post("/login", async (req, res, next) => {
   try {
-    const { eposta, sifre, isletme_id } = req.body;
+    const { eposta, sifre, isletme_id, oturumu_sonlandir } = req.body;
     if (!eposta || !sifre) {
       return res.status(400).json({
         hata_kodu: "EKSIK_ALAN",
@@ -59,14 +60,37 @@ router.post("/login", async (req, res, next) => {
 
     const kullanici = adaylar[0];
 
+    // TEK CİHAZDAN OTURUM KURALI — bu kullanıcının başka bir cihazda
+    // hâlâ geçerli bir oturumu varsa, "oturumu_sonlandir: true" ile
+    // onay gelmeden doğrudan giriş yapılmaz; kullanıcıya önce sorulur.
+    const { rows: mevcutOturumlar } = await pool.query(
+      `SELECT oturum_id FROM oturum WHERE kullanici_id = $1`,
+      [kullanici.kullanici_id]
+    );
+    if (mevcutOturumlar.length > 0 && !oturumu_sonlandir) {
+      return res.status(300).json({
+        hata_kodu: "BASKA_OTURUM_VAR",
+        mesaj: "Bu hesapla başka bir cihazda zaten oturum açık. Devam etmek için o oturumu sonlandırabilirsiniz.",
+      });
+    }
+    if (mevcutOturumlar.length > 0 && oturumu_sonlandir) {
+      await pool.query(`DELETE FROM oturum WHERE kullanici_id = $1`, [kullanici.kullanici_id]);
+    }
+
+    const jti = crypto.randomUUID();
     const token = jwt.sign(
       {
         kullanici_id: kullanici.kullanici_id,
         rol: kullanici.rol,
         isletme_id: kullanici.isletme_id, // Platform Admin için null
+        jti,
       },
       process.env.JWT_SECRET,
       { expiresIn: "8h" }
+    );
+    await pool.query(
+      `INSERT INTO oturum (kullanici_id, jti, ip_adresi) VALUES ($1, $2, $3)`,
+      [kullanici.kullanici_id, jti, req.ip || null]
     );
 
     await pool.query(
@@ -89,6 +113,20 @@ router.post("/login", async (req, res, next) => {
         isletme_id: kullanici.isletme_id,
       },
     });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/v1/auth/cikis — mevcut oturumu (bu tarayıcının kaydını)
+// sonlandırır, böylece kullanıcı "tek cihaz" hakkını serbest bırakmış
+// olur ve başka bir cihazdan sorunsuz giriş yapabilir.
+router.post("/cikis", requireAuth, async (req, res, next) => {
+  try {
+    if (req.user.jti) {
+      await pool.query(`DELETE FROM oturum WHERE jti = $1`, [req.user.jti]);
+    }
+    res.json({ mesaj: "Çıkış yapıldı." });
   } catch (err) {
     next(err);
   }
