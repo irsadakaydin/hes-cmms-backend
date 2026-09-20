@@ -83,4 +83,59 @@ router.delete(
   }
 );
 
+// GET /api/v1/sistem-ayarlari/zamanlayici — zamanlayıcının (görev üretimi,
+// hatırlatma, geciken işaretleme) aktif olup olmadığını döner. Yalnızca
+// GM'in görmesi yeterli olduğu için auth gerektiriyor.
+router.get(
+  "/sistem-ayarlari/zamanlayici",
+  requireAuth,
+  withDbContext,
+  requireRole("ADMIN"),
+  async (req, res, next) => {
+    try {
+      const { rows } = await pool.query(
+        `SELECT deger FROM sistem_ayarlari WHERE anahtar = 'zamanlayici_aktif'`
+      );
+      // Satır hiç yoksa (ilk kurulumda migration henüz çalışmamışsa) varsayılan
+      // AKTİF kabul edilir — sistemin mevcut (zaten çalışan) davranışını korur.
+      res.json({ aktif_mi: rows[0] ? rows[0].deger !== "false" : true });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// PATCH /api/v1/sistem-ayarlari/zamanlayici — { aktif_mi: true|false }
+// yalnızca Platform Admin (GM) değiştirebilir. Zamanlayıcının kendisi
+// (hes_cmms_scheduler.js), her çalıştığında bu bayrağı kontrol edip
+// PASİF ise hiçbir işlem yapmadan çıkar.
+router.patch(
+  "/sistem-ayarlari/zamanlayici",
+  requireAuth,
+  withDbContext,
+  requireRole("ADMIN"),
+  async (req, res, next) => {
+    try {
+      if (typeof req.body.aktif_mi !== "boolean") {
+        return res.status(400).json({
+          hata_kodu: "EKSIK_ALAN",
+          mesaj: "aktif_mi alanı (true/false) zorunludur.",
+        });
+      }
+      await pool.query(
+        `INSERT INTO sistem_ayarlari (anahtar, deger, guncelleme_tarihi)
+         VALUES ('zamanlayici_aktif', $1, now())
+         ON CONFLICT (anahtar) DO UPDATE SET deger = EXCLUDED.deger, guncelleme_tarihi = now()`,
+        [String(req.body.aktif_mi)]
+      );
+      res.json({
+        mesaj: req.body.aktif_mi ? "Zamanlayıcı aktifleştirildi." : "Zamanlayıcı pasifleştirildi.",
+        aktif_mi: req.body.aktif_mi,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
 module.exports = router;
