@@ -1,5 +1,9 @@
 const { pool } = require("../db");
 
+// Bir bağlantı bu süreden uzun iade edilmezse Render loglarına, hangi
+// isteğin tuttuğunu yazan bir uyarı düşer (havuz tükenmesi teşhisi için).
+const UZUN_TUTMA_MS = 30000;
+
 /**
  * Her istek için havuzdan AYRI bir bağlantı (client) alır ve
  * PostgreSQL oturum değişkeni app.current_user_id'yi set eder.
@@ -12,7 +16,37 @@ const { pool } = require("../db");
  * (req.user'ın dolu olması gerekir).
  */
 async function withDbContext(req, res, next) {
-  const client = await pool.connect();
+  let client;
+  try {
+    client = await pool.connect();
+  } catch (baglantiHatasi) {
+    // Bağlantı alınamadı (havuz dolu ya da veritabanına ulaşılamıyor).
+    // Bu hata yakalanmazsa istek asılı kalır ve süreç çökebilir.
+    console.error(
+      "Veritabanı bağlantısı alınamadı:",
+      req.method,
+      req.originalUrl,
+      "-",
+      baglantiHatasi.message,
+      `(toplam:${pool.totalCount} boşta:${pool.idleCount} bekleyen:${pool.waitingCount})`
+    );
+    return res.status(503).json({
+      hata_kodu: "VERITABANI_MESGUL",
+      mesaj: "Sunucu şu an yoğun, lütfen birkaç saniye sonra tekrar deneyin.",
+    });
+  }
+
+  // İstek tamamlandığında bağlantıyı havuza iade et (yalnızca bir kez)
+  let released = false;
+  let uyariZamanlayici = null;
+  const releaseOnce = () => {
+    if (!released) {
+      released = true;
+      if (uyariZamanlayici) clearTimeout(uyariZamanlayici);
+      client.release();
+    }
+  };
+
   try {
     if (req.user && req.user.kullanici_id) {
       // set_config(..., false) => sadece bu bağlantı/işlem ömrü boyunca geçerli
@@ -22,20 +56,20 @@ async function withDbContext(req, res, next) {
     }
     req.db = client;
 
-    // İstek tamamlandığında bağlantıyı havuza iade et (yalnızca bir kez)
-    let released = false;
-    const releaseOnce = () => {
-      if (!released) {
-        released = true;
-        client.release();
-      }
-    };
+    uyariZamanlayici = setTimeout(() => {
+      console.error(
+        `UYARI: veritabanı bağlantısı ${UZUN_TUTMA_MS / 1000} sn'dir iade edilmedi:`,
+        req.method,
+        req.originalUrl
+      );
+    }, UZUN_TUTMA_MS);
+
     res.on("finish", releaseOnce);
     res.on("close", releaseOnce);
 
     next();
   } catch (err) {
-    client.release();
+    releaseOnce();
     next(err);
   }
 }
