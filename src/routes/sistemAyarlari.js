@@ -83,22 +83,22 @@ router.delete(
   }
 );
 
-// GET /api/v1/sistem-ayarlari/zamanlayici/:isletme_id — belirli bir
-// HOLDİNGİN zamanlayıcısının (görev üretimi, hatırlatma, geciken
-// işaretleme) aktif olup olmadığını döner.
+// GET /api/v1/sistem-ayarlari/zamanlayici/:santral_id — belirli bir
+// SANTRALİN (tesisin) zamanlayıcısının (görev üretimi, hatırlatma,
+// geciken işaretleme) aktif olup olmadığını döner.
 router.get(
-  "/sistem-ayarlari/zamanlayici/:isletme_id",
+  "/sistem-ayarlari/zamanlayici/:santral_id",
   requireAuth,
   withDbContext,
   requireRole("ADMIN"),
   async (req, res, next) => {
     try {
       const { rows } = await pool.query(
-        `SELECT zamanlayici_aktif FROM isletme WHERE isletme_id = $1`,
-        [req.params.isletme_id]
+        `SELECT zamanlayici_aktif FROM santral WHERE santral_id = $1`,
+        [req.params.santral_id]
       );
       if (!rows[0]) {
-        return res.status(404).json({ hata_kodu: "ISLETME_BULUNAMADI", mesaj: "Holding bulunamadı." });
+        return res.status(404).json({ hata_kodu: "SANTRAL_BULUNAMADI", mesaj: "Santral bulunamadı." });
       }
       res.json({ aktif_mi: rows[0].zamanlayici_aktif });
     } catch (err) {
@@ -107,13 +107,14 @@ router.get(
   }
 );
 
-// PATCH /api/v1/sistem-ayarlari/zamanlayici/:isletme_id — { aktif_mi: true|false }
+// PATCH /api/v1/sistem-ayarlari/zamanlayici/:santral_id — { aktif_mi: true|false }
 // yalnızca Platform Admin (GM) değiştirebilir. Zamanlayıcının kendisi
 // (hes_cmms_scheduler.js), her çalıştığında HER PLAN için, o planın
-// bağlı olduğu holdingin bu bayrağını kontrol eder — pasif olan
-// holdinglerin planları atlanır, diğerleri normal işlenir.
+// bağlı olduğu SANTRALİN bu bayrağını kontrol eder — pasif olan
+// santrallerin planları atlanır, diğerleri (aynı holding dahil) normal
+// işlenir.
 router.patch(
-  "/sistem-ayarlari/zamanlayici/:isletme_id",
+  "/sistem-ayarlari/zamanlayici/:santral_id",
   requireAuth,
   withDbContext,
   requireRole("ADMIN"),
@@ -126,14 +127,14 @@ router.patch(
         });
       }
       const { rows } = await pool.query(
-        `UPDATE isletme SET zamanlayici_aktif = $1 WHERE isletme_id = $2 RETURNING isletme_id`,
-        [req.body.aktif_mi, req.params.isletme_id]
+        `UPDATE santral SET zamanlayici_aktif = $1 WHERE santral_id = $2 RETURNING santral_id`,
+        [req.body.aktif_mi, req.params.santral_id]
       );
       if (!rows[0]) {
-        return res.status(404).json({ hata_kodu: "ISLETME_BULUNAMADI", mesaj: "Holding bulunamadı." });
+        return res.status(404).json({ hata_kodu: "SANTRAL_BULUNAMADI", mesaj: "Santral bulunamadı." });
       }
       res.json({
-        mesaj: req.body.aktif_mi ? "Zamanlayıcı bu holding için aktifleştirildi." : "Zamanlayıcı bu holding için pasifleştirildi.",
+        mesaj: req.body.aktif_mi ? "Zamanlayıcı bu santral için aktifleştirildi." : "Zamanlayıcı bu santral için pasifleştirildi.",
         aktif_mi: req.body.aktif_mi,
       });
     } catch (err) {
