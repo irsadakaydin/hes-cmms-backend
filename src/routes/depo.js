@@ -38,12 +38,17 @@ async function erisimYoksaReddet(req, res, santral_id) {
 }
 
 // Kritik stok altına düşen bir malzeme için Santral Sorumlusu(lar)ı ve
-// İşletme Admin(ler)ini mesaj kutusuyla uyarır. Mesajlaşma tablosunun tam
-// yapısı bu ortamda doğrulanamadığı için bu fonksiyon KENDİ try/catch'i
-// içinde çalışır — burada bir hata olsa bile giriş/çıkış işleminin kendisi
-// ETKİLENMEZ, yalnızca konsola loglanır. Eğer uyarı mesajları gelmiyorsa,
-// bu fonksiyonun içeriğini gerçek `mesaj` tablonuzun şemasına göre
-// güncellememiz gerekebilir.
+// İşletme Admin(ler)ini mesaj kutusuyla uyarır.
+//
+// `mesaj` tablosunun gerçek şeması (Supabase'den doğrulandı):
+//   mesaj_id (otomatik), gonderen_kullanici_id (ZORUNLU), alici_kullanici_id
+//   (ZORUNLU), icerik (ZORUNLU), gonderim_tarihi (otomatik), okundu_mu
+//   (otomatik), okunma_tarihi (boş olabilir). "konu" sütunu YOKTUR — başlık
+//   metni icerik'in başına yazılır.
+// Gönderen olarak çıkışı onaylayan kullanıcı (req.user) kullanılır.
+//
+// Bu fonksiyon KENDİ try/catch'i içinde çalışır — burada bir hata olsa bile
+// giriş/çıkış işleminin kendisi ETKİLENMEZ, yalnızca konsola loglanır.
 async function kritikStokUyarisiGonder(req, malzeme) {
   try {
     if (malzeme.kritik_stok_miktari == null) return;
@@ -66,31 +71,32 @@ async function kritikStokUyarisiGonder(req, malzeme) {
 
     for (const alici of aliciRows) {
       await req.db.query(
-        `INSERT INTO mesaj (gonderen_kullanici_id, alici_kullanici_id, konu, icerik)
-         VALUES (NULL, $1, 'Kritik Stok Uyarısı', $2)`,
-        [alici.kullanici_id, mesajMetni]
+        `INSERT INTO mesaj (gonderen_kullanici_id, alici_kullanici_id, icerik)
+         VALUES ($1, $2, $3)`,
+        [req.user.kullanici_id, alici.kullanici_id, "Kritik Stok Uyarısı: " + mesajMetni]
       );
     }
   } catch (err) {
-    console.error("Kritik stok uyarı mesajı gönderilemedi (mesaj tablosu şeması doğrulanmalı):", err.message);
+    console.error("Kritik stok uyarı mesajı gönderilemedi:", err.message);
   }
 }
 
 // Bir çıkış talebi reddedilince, talebi yapan kullanıcıya bildirim gönderir.
 // Aynı şekilde kendi try/catch'i içinde — başarısız olsa bile reddetme
-// işleminin kendisini ETKİLEMEZ.
+// işleminin kendisini ETKİLEMEZ. ("konu" sütunu yok, başlık icerik'in
+// başında.)
 async function cikisRedBildirimiGonder(req, talep) {
   try {
     const mesajMetni = talep.red_notu
       ? `"${talep.malzeme_adi}" (${talep.miktar} ${talep.birim}) için çıkış talebiniz onaylanmamıştır. Not: ${talep.red_notu}`
       : `"${talep.malzeme_adi}" (${talep.miktar} ${talep.birim}) için çıkış talebiniz onaylanmamıştır.`;
     await req.db.query(
-      `INSERT INTO mesaj (gonderen_kullanici_id, alici_kullanici_id, konu, icerik)
-       VALUES ($1, $2, 'İsteğiniz Onaylanmamıştır', $3)`,
-      [req.user.kullanici_id, talep.talep_eden_kullanici_id, mesajMetni]
+      `INSERT INTO mesaj (gonderen_kullanici_id, alici_kullanici_id, icerik)
+       VALUES ($1, $2, $3)`,
+      [req.user.kullanici_id, talep.talep_eden_kullanici_id, "İsteğiniz Onaylanmamıştır: " + mesajMetni]
     );
   } catch (err) {
-    console.error("Çıkış red bildirimi gönderilemedi (mesaj tablosu şeması doğrulanmalı):", err.message);
+    console.error("Çıkış red bildirimi gönderilemedi:", err.message);
   }
 }
 
