@@ -83,34 +83,37 @@ router.delete(
   }
 );
 
-// GET /api/v1/sistem-ayarlari/zamanlayici — zamanlayıcının (görev üretimi,
-// hatırlatma, geciken işaretleme) aktif olup olmadığını döner. Yalnızca
-// GM'in görmesi yeterli olduğu için auth gerektiriyor.
+// GET /api/v1/sistem-ayarlari/zamanlayici/:isletme_id — belirli bir
+// HOLDİNGİN zamanlayıcısının (görev üretimi, hatırlatma, geciken
+// işaretleme) aktif olup olmadığını döner.
 router.get(
-  "/sistem-ayarlari/zamanlayici",
+  "/sistem-ayarlari/zamanlayici/:isletme_id",
   requireAuth,
   withDbContext,
   requireRole("ADMIN"),
   async (req, res, next) => {
     try {
       const { rows } = await pool.query(
-        `SELECT deger FROM sistem_ayarlari WHERE anahtar = 'zamanlayici_aktif'`
+        `SELECT zamanlayici_aktif FROM isletme WHERE isletme_id = $1`,
+        [req.params.isletme_id]
       );
-      // Satır hiç yoksa (ilk kurulumda migration henüz çalışmamışsa) varsayılan
-      // AKTİF kabul edilir — sistemin mevcut (zaten çalışan) davranışını korur.
-      res.json({ aktif_mi: rows[0] ? rows[0].deger !== "false" : true });
+      if (!rows[0]) {
+        return res.status(404).json({ hata_kodu: "ISLETME_BULUNAMADI", mesaj: "Holding bulunamadı." });
+      }
+      res.json({ aktif_mi: rows[0].zamanlayici_aktif });
     } catch (err) {
       next(err);
     }
   }
 );
 
-// PATCH /api/v1/sistem-ayarlari/zamanlayici — { aktif_mi: true|false }
+// PATCH /api/v1/sistem-ayarlari/zamanlayici/:isletme_id — { aktif_mi: true|false }
 // yalnızca Platform Admin (GM) değiştirebilir. Zamanlayıcının kendisi
-// (hes_cmms_scheduler.js), her çalıştığında bu bayrağı kontrol edip
-// PASİF ise hiçbir işlem yapmadan çıkar.
+// (hes_cmms_scheduler.js), her çalıştığında HER PLAN için, o planın
+// bağlı olduğu holdingin bu bayrağını kontrol eder — pasif olan
+// holdinglerin planları atlanır, diğerleri normal işlenir.
 router.patch(
-  "/sistem-ayarlari/zamanlayici",
+  "/sistem-ayarlari/zamanlayici/:isletme_id",
   requireAuth,
   withDbContext,
   requireRole("ADMIN"),
@@ -122,14 +125,15 @@ router.patch(
           mesaj: "aktif_mi alanı (true/false) zorunludur.",
         });
       }
-      await pool.query(
-        `INSERT INTO sistem_ayarlari (anahtar, deger, guncelleme_tarihi)
-         VALUES ('zamanlayici_aktif', $1, now())
-         ON CONFLICT (anahtar) DO UPDATE SET deger = EXCLUDED.deger, guncelleme_tarihi = now()`,
-        [String(req.body.aktif_mi)]
+      const { rows } = await pool.query(
+        `UPDATE isletme SET zamanlayici_aktif = $1 WHERE isletme_id = $2 RETURNING isletme_id`,
+        [req.body.aktif_mi, req.params.isletme_id]
       );
+      if (!rows[0]) {
+        return res.status(404).json({ hata_kodu: "ISLETME_BULUNAMADI", mesaj: "Holding bulunamadı." });
+      }
       res.json({
-        mesaj: req.body.aktif_mi ? "Zamanlayıcı aktifleştirildi." : "Zamanlayıcı pasifleştirildi.",
+        mesaj: req.body.aktif_mi ? "Zamanlayıcı bu holding için aktifleştirildi." : "Zamanlayıcı bu holding için pasifleştirildi.",
         aktif_mi: req.body.aktif_mi,
       });
     } catch (err) {
