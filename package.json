@@ -11,16 +11,20 @@
   "dependencies": {
     "@supabase/supabase-js": "^2.115.0",
     "bcrypt": "^5.1.1",
-    "bcryptjs": "^2.4.3",
+    "bcryptjs": "2.4.3",
     "cors": "^2.8.6",
     "dotenv": "^16.4.5",
     "exceljs": "^4.4.0",
-    "express": "^4.19.2",
+    "express": "4.22.2",
     "express-rate-limit": "^8.7.0",
     "helmet": "^8.3.0",
     "jsonwebtoken": "^9.0.2",
     "pdfkit": "^0.20.2",
     "pg": "^8.11.5",
     "qrcode": "^1.5.4"
+  },
+  "overrides": {
+    "qs": "6.15.3",
+    "body-parser": "1.20.6"
   }
 }
