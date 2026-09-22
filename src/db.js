@@ -2,6 +2,14 @@ const { Pool } = require("pg");
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
+  // Supabase projesi "Nano" hesaplama katmanında — bu katmanda izin verilen
+  // bağlantı havuzu boyutu 15 (Project Settings → Database → Connection
+  // pooling). pg kütüphanesinin varsayılanı (10) bunun altında kalıp
+  // Supabase tarafında hâlâ yer varken uygulamanın kendi havuzunu erken
+  // doldurmasına yol açıyordu. 12'ye çıkarıyoruz; kalan 3'ü Supabase SQL
+  // Editor gibi başka araçlara bırakıyoruz. Hesaplama katmanı yükseltilirse
+  // (Nano üstü) bu değer de yükseltilebilir.
+  max: 12,
   // Havuzdan bağlantı alamayan (ya da yeni bağlantı kuramayan) istek,
   // SONSUZA KADAR beklemek yerine bu süre sonunda hata verir. Böylece
   // "Giriş yapılıyor…" ekranında sessizce donma yerine, Render
