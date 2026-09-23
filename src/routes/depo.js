@@ -436,17 +436,21 @@ router.get("/santraller/:santral_id/depo/rapor/pdf", async (req, res, next) => {
     let sorgu;
     if (tip === "giris") {
       sorgu = `SELECT g.fis_no, g.giris_tarihi AS tarih, m.ad AS malzeme_adi, m.sku, g.miktar, m.birim,
-                      k.ad_soyad AS ilgili_kisi, NULL AS kullanim_yeri
+                      k.ad_soyad AS teslim_alan_adi, NULL AS kullanim_yeri
                FROM depo_giris g
                JOIN depo_malzeme m ON m.malzeme_id = g.malzeme_id
                LEFT JOIN kullanici k ON k.kullanici_id = g.teslim_alan_kullanici_id
                WHERE g.santral_id = $1`;
     } else {
+      // Çıkış raporunda TALEP EDEN ve ONAYLAYAN ayrı sütunlar — depo/cikis
+      // GET listesiyle (yukarıdaki router.get("/santraller/:santral_id/depo/cikis")
+      // ile) AYNI iki JOIN mantığı kullanılıyor.
       sorgu = `SELECT c.fis_no, c.cikis_tarihi AS tarih, m.ad AS malzeme_adi, m.sku, c.miktar, m.birim,
-                      k.ad_soyad AS ilgili_kisi, c.kullanim_yeri
+                      talep_eden.ad_soyad AS talep_eden_adi, onaylayan.ad_soyad AS onaylayan_adi, c.kullanim_yeri
                FROM depo_cikis c
                JOIN depo_malzeme m ON m.malzeme_id = c.malzeme_id
-               LEFT JOIN kullanici k ON k.kullanici_id = c.talep_eden_kullanici_id
+               LEFT JOIN kullanici talep_eden ON talep_eden.kullanici_id = c.talep_eden_kullanici_id
+               LEFT JOIN kullanici onaylayan ON onaylayan.kullanici_id = c.onaylayan_kullanici_id
                WHERE c.santral_id = $1 AND c.durum = 'ONAYLANDI'`;
     }
     if (req.query.baslangic) {
@@ -508,16 +512,17 @@ router.get("/santraller/:santral_id/depo/rapor/pdf", async (req, res, next) => {
             { baslik: "Malzeme", genislik: 220 },
             { baslik: "SKU", genislik: 95 },
             { baslik: "Miktar", genislik: 90 },
-            { baslik: "İlgili Kişi", genislik: 160 },
+            { baslik: "Teslim Alan", genislik: 160 },
           ]
         : [
-            { baslik: "Fiş No", genislik: 85 },
-            { baslik: "Tarih", genislik: 85 },
-            { baslik: "Malzeme", genislik: 175 },
-            { baslik: "SKU", genislik: 80 },
-            { baslik: "Miktar", genislik: 75 },
-            { baslik: "Kullanım Yeri", genislik: 170 },
-            { baslik: "İlgili Kişi", genislik: 130 },
+            { baslik: "Fiş No", genislik: 72 },
+            { baslik: "Tarih", genislik: 72 },
+            { baslik: "Malzeme", genislik: 140 },
+            { baslik: "SKU", genislik: 62 },
+            { baslik: "Miktar", genislik: 58 },
+            { baslik: "Kullanım Yeri", genislik: 125 },
+            { baslik: "Talep Eden", genislik: 95 },
+            { baslik: "Onaylayan", genislik: 95 },
           ];
     const tabloSolX = 40;
     let y = dokuman.y;
@@ -554,10 +559,11 @@ router.get("/santraller/:santral_id/depo/rapor/pdf", async (req, res, next) => {
       hucreYaz(r.sku, 3, false);
       hucreYaz(`${r.miktar} ${r.birim}`, 4, false);
       if (tip === "giris") {
-        hucreYaz(r.ilgili_kisi, 5, false);
+        hucreYaz(r.teslim_alan_adi, 5, false);
       } else {
         hucreYaz(r.kullanim_yeri, 5, false);
-        hucreYaz(r.ilgili_kisi, 6, false);
+        hucreYaz(r.talep_eden_adi, 6, false);
+        hucreYaz(r.onaylayan_adi, 7, false);
       }
       y += SATIR_YUKSEKLIGI;
     });
