@@ -1,0 +1,37 @@
+# Render Blueprint — hes-cmms-backend
+#
+# Bu dosya, GitHub'daki hes-cmms-backend reposunun KÖKÜNE yüklenir. Yüklendikten
+# sonra Render panelinde "New +" → "Blueprint" ile bu repo seçilirse, Render
+# aşağıdaki servisi OTOMATİK olarak doğru ayarlarla oluşturur — elle "Web
+# Service" kurup Build/Start komutlarını tek tek yazmaya gerek kalmaz.
+#
+# ÖNEMLİ — bu dosya SIR (şifre/anahtar) İÇERMEZ, içeremez de: render.yaml
+# GitHub'da herkese açık durduğu için gerçek DATABASE_URL, JWT_SECRET gibi
+# değerleri buraya yazmak bunları ifşa eder. "sync: false" işaretli her
+# değişken, Render Blueprint'i çalıştırırken ekranda boş bir kutu olarak
+# çıkar — o kutuya gerçek değeri SİZ elle yapıştırırsınız (FELAKET_KURTARMA.md
+# dosyasındaki listeden). Render bu değerleri bir daha bu dosyaya yazmaz,
+# yalnızca kendi panelinde saklar.
+services:
+  - type: web
+    name: hes-cmms-backend
+    runtime: node
+    plan: free
+    region: frankfurt
+    branch: main
+    buildCommand: npm install
+    startCommand: node src/index.js
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_STORAGE_BUCKET
+        sync: false
+      - key: FRONTEND_URLS
+        sync: false
